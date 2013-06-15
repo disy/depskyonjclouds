@@ -1,0 +1,54 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+   <modelVersion>4.0.0</modelVersion>
+   <parent>
+      <groupId>org.depskyonjclouds</groupId>
+      <artifactId>parent</artifactId>
+      <version>0.0.1-SNAPSHOT</version>
+      <relativePath>../</relativePath>
+   </parent>
+   <groupId>org.depskyjclouds</groupId>
+   <artifactId>depsky</artifactId>
+   <name>DepSky</name>
+   <description>DepSky implementation</description>
+
+   <dependencies>
+
+      <dependency>
+         <groupId>com.google.inject</groupId>
+         <artifactId>guice</artifactId>
+         <version>3.0</version>
+      </dependency>
+      <dependency>
+         <groupId>com.google.inject.extensions</groupId>
+         <artifactId>guice-assistedinject</artifactId>
+         <version>3.0</version>
+      </dependency>
+      <dependency>
+         <groupId>com.google.guava</groupId>
+         <artifactId>guava</artifactId>
+         <version>14.0-rc3</version>
+      </dependency>
+      <dependency>
+         <groupId>org.apache.commons</groupId>
+         <artifactId>commons-io</artifactId>
+         <version>1.3.2</version>
+      </dependency>
+      <dependency>
+         <groupId>org.jclouds</groupId>
+         <artifactId>jclouds-blobstore</artifactId>
+         <version>1.6.0-alpha.2</version>
+      </dependency>
+      <dependency>
+         <groupId>org.jclouds.provider</groupId>
+         <artifactId>aws-s3</artifactId>
+         <version>1.6.0-alpha.2</version>
+      </dependency>
+      <dependency>
+         <groupId>org.jclouds.api</groupId>
+         <artifactId>filesystem</artifactId>
+         <version>1.6.0-alpha.2</version>
+      </dependency>
+
+   </dependencies>
+</project>
