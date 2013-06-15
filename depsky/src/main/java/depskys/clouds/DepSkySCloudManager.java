@@ -1,21 +1,14 @@
 package depskys.clouds;
 
-import java.io.ByteArrayOutputStream;
-import java.util.ArrayList;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.collect.Iterables.contains;
+
 import java.util.LinkedList;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.LinkedBlockingQueue;
-
-import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.collect.Iterables.contains;
-
-import message.Message;
 
 import org.jclouds.ContextBuilder;
 import org.jclouds.apis.ApiMetadata;
@@ -186,7 +179,6 @@ public class DepSkySCloudManager implements Callable<Void> {
                 
                 r = new CloudReply(request.getmSeqNumber(), mProperties.getProperty("jclouds.provider"), response, System.currentTimeMillis());
                 r.setmOp(request.getmOp());
-                r.setmContainerName(request.getmContainerName());
                 r.setmDataUnit(request.getReg());
                 r.setmIsMetadataFile(request.ismIsMetadataFile());
                 r.setmValue(request.getmW_data());
@@ -197,7 +189,10 @@ public class DepSkySCloudManager implements Callable<Void> {
                 if (request.getmDataFileName().contains("metadata") && request.ismIsMetadataFile()) {
                     r.setmReceiveTime(System.currentTimeMillis());
                     r.setmStartTime(request.getmStartTime());
+                    r.setmContainerName(request.getmContainerName());
                 }
+                
+                r.setmType(NEW_DATA);
 
                 addReply(r);
                 break;
@@ -225,6 +220,8 @@ public class DepSkySCloudManager implements Callable<Void> {
                 } else {
                     r.setmMetadataReceiveTime(request.getmMetadataReceiveTime());
                 }
+                
+                r.setmType(GET_DATA);
 
                 addReply(r);
                 break;
@@ -240,6 +237,10 @@ public class DepSkySCloudManager implements Callable<Void> {
                 r.setmDataUnit(request.getReg());
                 r.setmIsMetadataFile(request.ismIsMetadataFile());
                 r.setmHashMatching(request.getmHashMatching());
+                
+                r.setmType(DEL_DATA);
+                
+                addReply(r);
                 break;
             case LIST:
 
@@ -261,6 +262,8 @@ public class DepSkySCloudManager implements Callable<Void> {
                 r.setmVersionNumber(request.getmVersionNumber());
                 r.setmAllDataHash(request.getmAllDataHash());
                 r.setmListNames(names);
+                
+                r.setmType(LIST);
 
                 addReply(r);
                 break;
@@ -272,6 +275,9 @@ public class DepSkySCloudManager implements Callable<Void> {
                 r.setmDataUnit(request.getReg());
                 r.setmIsMetadataFile(request.ismIsMetadataFile());
                 r.setmHashMatching(request.getmHashMatching());
+
+                r.setmType(SET_ACL);
+
                 addReply(r);
             default:
                 // System.out.println("Operation does not exist");
@@ -310,53 +316,58 @@ public class DepSkySCloudManager implements Callable<Void> {
             r.setmExceptionMessage(ex.getMessage());
             r.setmStartTime(request.getmStartTime());
             r.invalidateResponse();
-            addReply(r);
+            
         }
     }
 
-    // process received replies
+    /*
+     *  process received replies
+     */
     private void processReply() {
         try {
-            CloudReply reply = mReplies.remove(0);// processing removed reply next
+            CloudReply reply = mReplies.take();// processing removed reply next
             if (reply == null) {
                 // System.out.println("REPLY IS NULL!!");
                 return;
             }
             // if error
-            if (reply.mResponse == null) {
+            if (reply.getmResponse() == null) {
                 mDepskys.dataReceived(reply);
                 return;
             }
             // response may be processed
-            if (reply.mResponse != null) {
+            if (reply.getmResponse() != null) {
                 // process not null response
-                if (reply.mType == SET_ACL) {
+                if (reply.getmType() == SET_ACL) {
                     mDepskys.dataReceived(reply);
-                } else if (reply.mType == GET_DATA && reply.mIsMetadataFile) {
+                } else if (reply.getmType() == GET_DATA && reply.ismIsMetadataFile()) {
                     /* metadata file */
                     mCloudDataManager.processMetadata(reply);
-                } else if (reply.mType == GET_DATA) {
+                } else if (reply.getmType() == GET_DATA) {
 
-                    if (reply.mVHash == null)
+                    if (reply.getmVHash() == null)
                         mDepskys.dataReceived(reply); /* to read quorum operation (out of the protocols) */
                     else
                         mCloudDataManager.checkDataIntegrity(reply); /* valuedata file */
-                } else if (reply.mType == GET_CONT_AND_DATA_ID) {
+                } else if (reply.getmType() == GET_CONT_AND_DATA_ID) {
                     // send file request for metadata file ids received
-                    String[] ids = (String[])reply.mResponse;
+                    String[] ids = (String[])reply.getmResponse();
                     // update container id in local register (cid is a constant value)
-                    if (reply.mDataUnit.getContainerId(reply.mProviderId) == null) {
-                        reply.mDataUnit.setContainerId(reply.mProviderId, ((String[])reply.mResponse)[0]);
+                    if (reply.getmDataUnit().getContainerId(reply.getmProviderId()) == null) {
+                        reply.getmDataUnit().setContainerId(reply.getmProviderId(), ((String[])reply.getmResponse())[0]);
                     }
-                    CloudRequest r =
-                        new CloudRequest(GET_DATA, reply.mSequenceNumber, mBlobStore.getSessionKey(), ids[0],
-                            ids[1], null, null, reply.mDataUnit, reply.mProtoOp, true, reply.mHashMatching);
-                    r.setStartTime(reply.mStartTime);
+                    CloudRequest r = new CloudRequest(GET_DATA, ids[0], mProperties.getProperty("jclouds.provider"), reply.getmStartTime());
+                    r.setmDataFileName(ids[1]);
+                    r.setReg(reply.getmDataUnit());
+                    r.setmSeqNumber(reply.getmSequenceNumber());
+                    r.setmIsMetadataFile(true);
+                    r.setmHashMatching(reply.getmHashMatching());
+                    
                     doRequest(r);
-                } else if (reply.mType == NEW_DATA && !reply.mIsMetadataFile && reply.mValue != null) {
+                } else if (reply.getmType() == NEW_DATA && !reply.ismIsMetadataFile() && reply.getmValue() != null) {
                     // System.out.println("WRITING METADATA for this reply" + reply);
                     mCloudDataManager.writeNewMetadata(reply);
-                } else if (reply.mType == NEW_DATA && reply.mIsMetadataFile && reply.mValue != null) {
+                } else if (reply.getmType() == NEW_DATA && reply.ismIsMetadataFile() && reply.getmValue() != null) {
                     mDepskys.dataReceived(reply);
                     return;
                 } else {
@@ -365,7 +376,7 @@ public class DepSkySCloudManager implements Callable<Void> {
                 }
             }
             // if after processing response was invalidated
-            if (reply.mResponse == null) {
+            if (reply.getmResponse() == null) {
                 // deliver reply if response was null
                 mDepskys.dataReceived(reply);
                 return;

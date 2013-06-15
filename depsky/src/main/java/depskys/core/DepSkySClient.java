@@ -50,8 +50,9 @@ import depskys.clouds.drivers.LocalDiskDriver;
  * 
  * @author tiago oliveira
  * @author bruno quaresma
+ *         Modified by @author Andreas Rain, University of Konstanz
  */
-public class LocalDepSkySClient implements IDepSkySProtocol{
+public class DepSkySClient implements IDepSkySProtocol{
 
 	/**
 	 * @param args
@@ -59,8 +60,7 @@ public class LocalDepSkySClient implements IDepSkySProtocol{
 	private int clientId;
 	public int N, F, T = 2/*jss_shares=f+1*/, NUM_BITS = 192;
 	private int sequence = -1;
-	private IDepSkySDriver cloud1, cloud2, cloud3, cloud4;
-	private IDepSkySDriver[] drivers;
+	private DepSkySCloudManager[] mCloudManagers;
 	private DepSkySManager manager;
 	public HashMap<Integer, CloudRepliesControlSet> replies;
 	public boolean parallelRequests = false;    //Optimized Read or Normal Read
@@ -82,7 +82,7 @@ public class LocalDepSkySClient implements IDepSkySProtocol{
 	 *                   if true, cloudofclouds are used instead
 	 * 
 	 */
-	public LocalDepSkySClient(int clientId, boolean useModel){
+	public DepSkySClient(int clientId, boolean useModel){
 
 		this.clientId = clientId;
 		if(!useModel){
@@ -667,7 +667,7 @@ public class LocalDepSkySClient implements IDepSkySProtocol{
 		CloudRepliesControlSet rcs = new CloudRepliesControlSet(N, seq);
 		replies.put(seq, rcs);
 		for(int i = 0; i < 4; i++)
-			manager.driversManagers[i].doRequest(
+			manager.mCloudManagers[i].doRequest(
 					new CloudRequest(DepSkySCloudManager.INIT_SESS, seq, null,
 							null, null, null, new Properties(), null, -1, false, null));
 
@@ -1170,7 +1170,7 @@ public class LocalDepSkySClient implements IDepSkySProtocol{
 				useClouds = false;
 			}
 
-			LocalDepSkySClient localDS = new LocalDepSkySClient(new Integer(args[0]), useClouds);
+			DepSkySClient localDS = new DepSkySClient(new Integer(args[0]), useClouds);
 			DepSkySDataUnit dataU = null;
 			int protocol_mode = 0;
 			if(args[1].equals("1")){

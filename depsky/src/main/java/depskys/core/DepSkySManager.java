@@ -27,6 +27,7 @@ import depskys.other.DepSkySKeyLoader;
  * Class that process and construct new metadata files, and also do some security evaluations
  * @author tiago oliveira
  * @author bruno
+ *         Modified by @author Andreas Rain, University of Konstanz
  *
  */
 public class DepSkySManager implements ICloudDataManager {
@@ -38,39 +39,42 @@ public class DepSkySManager implements ICloudDataManager {
 	public static final int ACL_PROTO = 2;
 	public static final int DELETE_ALL = 3;
 	public static final String CRLF = "\r\n";
-	public DepSkySCloudManager[] driversManagers;
-	public DepSkySKeyLoader keyLoader;
-	public /*IDepSkySProtocol*/ LocalDepSkySClient depskys;
+	
+	/**
+	 * The available cloud managers that can be used.
+	 */
+	public DepSkySCloudManager[] mCloudManagers;
+	/**
+	 * DepSkySKeyLoader
+	 */
+	public DepSkySKeyLoader mKeyLoader;
+	/**
+	 * Backreference to the client
+	 */
+	public DepSkySClient mDepSkySClient;
 	public ConcurrentHashMap<String, LinkedList<DepSkyMetadata>> cloud1;
 	public ConcurrentHashMap<String, LinkedList<DepSkyMetadata>> cloud2;
 	public ConcurrentHashMap<String, LinkedList<DepSkyMetadata>> cloud3;
 	public ConcurrentHashMap<String, LinkedList<DepSkyMetadata>> cloud4;
 
-	public DepSkySManager(IDepSkySDriver[] drivers, IDepSkySProtocol depskys) {
-		this.driversManagers = new DepSkySCloudManager[drivers.length];
-		this.keyLoader = new DepSkySKeyLoader(null);
-		this.depskys = (LocalDepSkySClient) depskys;
+	public DepSkySManager(DepSkySCloudManager[] pCloudManagers, IDepSkySProtocol depskys) {
+		this.mCloudManagers = pCloudManagers;
+		this.mKeyLoader = new DepSkySKeyLoader(null);
+		this.mDepSkySClient = (DepSkySClient) depskys;
 
 		cloud1 = new ConcurrentHashMap<String, LinkedList<DepSkyMetadata>>();
 		cloud2 = new ConcurrentHashMap<String, LinkedList<DepSkyMetadata>>();
 		cloud3 = new ConcurrentHashMap<String, LinkedList<DepSkyMetadata>>();
 		cloud4 = new ConcurrentHashMap<String, LinkedList<DepSkyMetadata>>();
 
-		init(drivers);
 	}
-
-	private void init(IDepSkySDriver[] drivers) {
-		for (int i = 0; i < drivers.length; i++) {
-			driversManagers[i] = new DepSkySCloudManager(drivers[i],
-					this, depskys);
-		}
-	}
+	
 	/**
 	 * Clear all request in queue to process
 	 */
 	public void clearAllRequestsToProcess() {
-		for (int i = 0; i < driversManagers.length; i++) {
-			driversManagers[i].resetRequests();
+		for (int i = 0; i < mCloudManagers.length; i++) {
+			mCloudManagers[i].resetRequests();
 		}
 	}
 
@@ -84,8 +88,8 @@ public class DepSkySManager implements ICloudDataManager {
 	 */
 	public void processMetadata(CloudReply metadataReply) {
 		try {
-			metadataReply.setReceiveTime(System.currentTimeMillis());
-			ByteArrayInputStream biss = new ByteArrayInputStream((byte[]) metadataReply.mResponse);
+			metadataReply.setmReceiveTime(System.currentTimeMillis());
+			ByteArrayInputStream biss = new ByteArrayInputStream((byte[]) metadataReply.getmResponse());
 			ObjectInputStream ins = new ObjectInputStream(biss);	
 
 			LinkedList<DepSkyMetadata> allmetadata = new LinkedList<DepSkyMetadata>();	
@@ -119,18 +123,20 @@ public class DepSkySManager implements ICloudDataManager {
 			DepSkyMetadata dm = null;
 			int cont = 0;
 			
-			if(metadataReply.mProtoOp == DepSkySManager.DELETE_ALL){
+			if(metadataReply.getmProtoOp() == DepSkySManager.DELETE_ALL){
 				String[] namesToDelete = new String[allmetadata.size() + 1];
-				namesToDelete[0] = metadataReply.mDataUnit.getMetadataFileName();
+				namesToDelete[0] = metadataReply.getmDataUnit().getMetadataFileName();
 				for(int i = 1; i < allmetadata.size()+1; i++){
 					namesToDelete[i] = allmetadata.get(i-1).getVersionFileId();
 				}
 				
-				DepSkySCloudManager manager = getDriverManagerByDriverId(metadataReply.mProviderId);
+				DepSkySCloudManager manager = getDriverManagerByDriverId(metadataReply.getmProviderId());
 				CloudRequest r = new CloudRequest(DepSkySCloudManager.DEL_CONT,
-						metadataReply.mSequenceNumber, manager.mCloudStorage.getSessionKey(),
-						metadataReply.mContainerName,namesToDelete,metadataReply.mDataUnit, 
-						DepSkySManager.DELETE_ALL, false);
+						metadataReply.getmContainerName(),null, metadataReply.getmStartTime());
+				r.setmSeqNumber(metadataReply.getmSequenceNumber());
+				r.setmNamesToDelete(namesToDelete);
+				r.setmProtoOp(DepSkySManager.DELETE_ALL);
+				r.setReg(metadataReply.getmDataUnit());
 				manager.doRequest(r);
 				
 				return ;
@@ -207,7 +213,7 @@ public class DepSkySManager implements ICloudDataManager {
 
 			if(metadataReply.mProtoOp == DepSkySManager.ACL_PROTO){
 
-				depskys.dataReceived(metadataReply);
+				mDepSkySClient.dataReceived(metadataReply);
 				return;
 			}
 
@@ -236,15 +242,15 @@ public class DepSkySManager implements ICloudDataManager {
 				//					manager.doRequest(r);//request valuedata file
 				//					return;
 				//				}
-				depskys.dataReceived(metadataReply);
+				mDepSkySClient.dataReceived(metadataReply);
 				return;
 			}
 			synchronized (this) {
-				if (metadataReply.mSequenceNumber == depskys.lastReadMetadataSequence) {
-					if (depskys.lastMetadataReplies == null) {
-						depskys.lastMetadataReplies = new ArrayList<CloudReply>();
+				if (metadataReply.mSequenceNumber == mDepSkySClient.lastReadMetadataSequence) {
+					if (mDepSkySClient.lastMetadataReplies == null) {
+						mDepSkySClient.lastMetadataReplies = new ArrayList<CloudReply>();
 					}
-					depskys.lastMetadataReplies.add(metadataReply);
+					mDepSkySClient.lastMetadataReplies.add(metadataReply);
 					metadataReply.mDataUnit.setCloudVersion(metadataReply.mProviderId, ts);
 					//System.out.println("IN:CLOUD VERSION " + ts + " for " + metadataReply.cloudId);
 				}
@@ -253,10 +259,10 @@ public class DepSkySManager implements ICloudDataManager {
 					//check release
 					return;
 				}
-				if (!depskys.sendingParallelRequests() && depskys.sentOne) {
+				if (!mDepSkySClient.sendingParallelRequests() && mDepSkySClient.sentOne) {
 					//                    depskys.dataReceived(metadataReply);
 				} else {
-					depskys.sentOne = true;
+					mDepSkySClient.sentOne = true;
 					DepSkySCloudManager manager = getDriverManagerByDriverId(metadataReply.mProviderId);
 					CloudRequest r = new CloudRequest(DepSkySCloudManager.GET_DATA,
 							metadataReply.mSequenceNumber, manager.mCloudStorage.getSessionKey(),
@@ -279,11 +285,11 @@ public class DepSkySManager implements ICloudDataManager {
 	private boolean canReleaseAndReturn(CloudReply mdreply) {
 		/*required in the case where we are waiting for n - f metadata replies and already have the value*/
 		try {
-			CloudRepliesControlSet rcs = depskys.replies.get(mdreply.mSequenceNumber);
+			CloudRepliesControlSet rcs = mDepSkySClient.replies.get(mdreply.mSequenceNumber);
 
 			if(rcs != null){
-				if (mdreply.mDataUnit.cloudVersions.size() >= depskys.N - depskys.F
-						&& rcs.replies.size() > depskys.F
+				if (mdreply.mDataUnit.cloudVersions.size() >= mDepSkySClient.N - mDepSkySClient.F
+						&& rcs.replies.size() > mDepSkySClient.F
 						&& mdreply.mDataUnit.isPVSS()) {
 					//System.out.println("pvssRnR_REPLIES SIZE = " + rcs.replies.size());
 					for (int i = 0; i < rcs.replies.size() - 1; i++) {
@@ -297,7 +303,7 @@ public class DepSkySManager implements ICloudDataManager {
 						}
 					}
 				}
-				if (mdreply.mDataUnit.cloudVersions.size() >= depskys.N - depskys.F
+				if (mdreply.mDataUnit.cloudVersions.size() >= mDepSkySClient.N - mDepSkySClient.F
 						&& rcs.replies.size() > 0
 						&& !mdreply.mDataUnit.isPVSS()) {
 					//System.out.println("normalRnR_REPLIES SIZE = " + rcs.replies.size());
@@ -332,7 +338,7 @@ public class DepSkySManager implements ICloudDataManager {
 			String valuehash = getHexString(getHash(value)); //hash of data value
 			valuedataReply.setReceiveTime(System.currentTimeMillis());
 			if (valuehash.equals(valuedataReply.mVHash)) { //comparing hash of data value with the hash presented in metadata file
-				depskys.dataReceived(valuedataReply);
+				mDepSkySClient.dataReceived(valuedataReply);
 			} else {
 				throw new Exception("integrity verification failed... " + valuedataReply);
 			}
@@ -455,7 +461,7 @@ public class DepSkySManager implements ICloudDataManager {
 	public byte[] getSignature(byte[] v) {
 		try {
 			Signature sig = Signature.getInstance("SHA1withRSA");
-			sig.initSign(keyLoader.loadPrivateKey(depskys.getClientId()));
+			sig.initSign(mKeyLoader.loadPrivateKey(mDepSkySClient.getClientId()));
 			sig.update(v);
 			return sig.sign();
 		} catch (Exception ex) {
@@ -475,7 +481,7 @@ public class DepSkySManager implements ICloudDataManager {
 	public boolean verifyMetadataSignature(int clientId, byte[] v, byte[] signature) {
 		try {
 			Signature sig = Signature.getInstance("SHA1withRSA");
-			sig.initVerify(keyLoader.loadPublicKey(clientId));
+			sig.initVerify(mKeyLoader.loadPublicKey(clientId));
 			sig.update(v);
 			return sig.verify(signature);
 		} catch (Exception ex) {
@@ -485,9 +491,9 @@ public class DepSkySManager implements ICloudDataManager {
 	}
 
 	public DepSkySCloudManager getDriverManagerByDriverId(String id) {
-		for (int i = 0; i < driversManagers.length; i++) {
-			if (driversManagers[i].mCloudStorage.getDriverId().equals(id)) {
-				return driversManagers[i];
+		for (int i = 0; i < mCloudManagers.length; i++) {
+			if (mCloudManagers[i].mCloudStorage.getDriverId().equals(id)) {
+				return mCloudManagers[i];
 			}
 		}
 		return null;
