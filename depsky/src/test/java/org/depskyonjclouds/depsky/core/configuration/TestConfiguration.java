@@ -1,19 +1,18 @@
 package org.depskyonjclouds.depsky.core.configuration;
 
+import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertNotNull;
+import static org.testng.Assert.fail;
+
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.file.Files;
-import java.nio.file.Paths;
 
-import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
-import static org.testng.Assert.*;
-import org.yaml.snakeyaml.TypeDescription;
 import org.yaml.snakeyaml.Yaml;
-import org.yaml.snakeyaml.constructor.Constructor;
 
-import depskys.core.configuration.Account;
 import depskys.core.configuration.Configuration;
 
 /**
@@ -29,20 +28,16 @@ public class TestConfiguration {
   
   @BeforeClass
   public void beforeClass() {
-      yamlPath = "src/main/resources/account.props.yml";
+      yamlPath = new StringBuilder().append("src").append(File.separator).append("main").append(File.separator).append("resources").append(File.separator).append("account.props.yml").toString();
   }
   
   @Test
   public void testConfigurationLoading() {
       InputStream in;
       try {
-          in = Files.newInputStream(Paths.get(yamlPath));
-          Constructor constructor = new Constructor(Configuration.class);
-          TypeDescription configDescription = new TypeDescription(Configuration.class);
-          configDescription.putListPropertyType("clouds", Account.class);
-          constructor.addTypeDescription(configDescription);
-          yaml = new Yaml(constructor);
-          config = yaml.loadAs(in, Configuration.class);
+          in = new FileInputStream(new File(yamlPath));
+          yaml = new Yaml();
+          config = (Configuration) yaml.load(in);
       } catch (IOException e) {
           fail();
       }
@@ -51,7 +46,8 @@ public class TestConfiguration {
   @Test(dependsOnMethods = "testConfigurationLoading")
   public void testLoadedConfiguration(){
       assertNotNull(config);
-      assertEquals(config.getAccounts().size(), 5);
+      assertEquals(config.getClouds().size(), 5);
+      System.out.println(config);
   }
 
 }

@@ -5,22 +5,23 @@ import java.util.List;
 public final class Configuration {
     
     private List<Account> clouds;
-
-    public Configuration(){
-        
-    }
     
-    public List<Account> getAccounts() {
+    public List<Account> getClouds() {
         return clouds;
     }
 
-    public void setAccounts(List<Account> clouds) {
+    public void setClouds(List<Account> clouds) {
         this.clouds = clouds;
     }
 
     @Override
     public String toString() {
-        return "Configuration [accounts=" + clouds + "]";
+        StringBuilder builder = new StringBuilder();
+        
+        for (Account acc : clouds) {
+            builder.append(acc.toString()).append("\n");
+        }
+        return builder.toString();
     }
     
 }
