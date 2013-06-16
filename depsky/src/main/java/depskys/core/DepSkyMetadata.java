@@ -1,9 +1,8 @@
 package depskys.core;
 
-import java.io.Externalizable;
+import java.io.DataInput;
+import java.io.DataOutput;
 import java.io.IOException;
-import java.io.ObjectInput;
-import java.io.ObjectOutput;
 
 /**
  * Class that stores the metadata information for each version
@@ -44,17 +43,17 @@ public class DepSkyMetadata {
 		return metadata;
 	}
 
-	public void readExternal(ObjectInput in) throws IOException,
+	public void deserialize(DataInput in) throws IOException,
 			ClassNotFoundException {
 		allDataHash = new byte[in.readInt()];
-		in.read(allDataHash);
+		in.readFully(allDataHash);
 		versionFileId = in.readUTF();
 		signature = new byte[in.readInt()];
-		in.read(signature);
+		in.readFully(signature);
 		metadata = in.readUTF();
 	}
 
-	public void writeExternal(ObjectOutput out) throws IOException {		
+	public void serialize(DataOutput out) throws IOException {		
 		out.writeInt(allDataHash.length);
 		out.write(allDataHash);
 		out.writeUTF(versionFileId);

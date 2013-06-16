@@ -10,8 +10,6 @@ import java.io.InputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.math.BigInteger;
-import java.nio.file.Files;
-import java.nio.file.Paths;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.text.ParseException;
@@ -19,8 +17,8 @@ import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
-import java.util.Properties;
-import java.util.Scanner;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
@@ -28,10 +26,7 @@ import javax.crypto.spec.SecretKeySpec;
 import jec.ReedSolDecoder;
 import jec.ReedSolEncoder;
 
-import org.apache.commons.io.IOUtils;
-import org.yaml.snakeyaml.TypeDescription;
 import org.yaml.snakeyaml.Yaml;
-import org.yaml.snakeyaml.constructor.Constructor;
 
 import pvss.InvalidVSSScheme;
 import pvss.PVSSEngine;
@@ -55,25 +50,30 @@ import depskys.core.configuration.Configuration;
  */
 public class DepSkySClient implements IDepSkySProtocol {
 
+    public int N, F, T = 2/* jss_shares=f+1 */, NUM_BITS = 192;
+
     /**
      * @param args
      */
     private int clientId;
-    public int N, F, T = 2/* jss_shares=f+1 */, NUM_BITS = 192;
     private int sequence = -1;
     private DepSkySCloudManager[] mCloudManagers;
     private DepSkySManager manager;
-    public HashMap<Integer, CloudRepliesControlSet> replies;
-    public boolean parallelRequests = false; // Optimized Read or Normal Read
+    private HashMap<Integer, CloudRepliesControlSet> replies;
+    private boolean parallelRequests = false; // Optimized Read or Normal Read
 
-    public List<CloudReply> lastReadReplies; // pointer for planet lab stats
-    public List<CloudReply> lastMetadataReplies; // pointer for planet lab stats
-    public int lastReadMetadataSequence = -1, lastReadRepliesMaxVerIdx = -1;
-    public boolean sentOne = false;
-    public byte[] testData = null;
+    private List<CloudReply> lastReadReplies; // pointer for planet lab stats
+    private List<CloudReply> lastMetadataReplies; // pointer for planet lab stats
+    private int lastReadMetadataSequence = -1, lastReadRepliesMaxVerIdx = -1;
+    private boolean sentOne = false;
+    private byte[] testData = null;
     private byte[] response = null;
     private ReedSolDecoder decoder;
     private ReedSolEncoder encoder;
+
+    private final String mConfigPath;
+
+    private ExecutorService mCloudService;
 
     /**
      * 
@@ -85,8 +85,9 @@ public class DepSkySClient implements IDepSkySProtocol {
      *            if true, cloudofclouds are used instead
      * 
      */
-    public DepSkySClient(int clientId) {
+    public DepSkySClient(int clientId, String pConfigPath) {
         this.clientId = clientId;
+        this.mConfigPath = pConfigPath;
         List<Account> credentials = null;
         try {
             credentials = readCredentials();
@@ -97,31 +98,28 @@ public class DepSkySClient implements IDepSkySProtocol {
             System.out.println("account.props.yml misconfigured!");
             e.printStackTrace();
         }
-        
+
         this.mCloudManagers = new DepSkySCloudManager[credentials.size()];
-        
+
         this.manager = new DepSkySManager(null, this);
-        
+
+        int c = 0;
         for (Account acc : credentials) {
-            Properties props = new Properties();
-            props.put("jclouds.provider", acc.getType());
-            props.put("jclouds.identity", acc.getAccessKey());
-            props.put("jclouds.credential", acc.getSecretKey());
-            
-            DepSkySCloudManager cloudManager = new DepSkySCloudManager(props, manager, this);
+            DepSkySCloudManager cloudManager = new DepSkySCloudManager(acc, manager, this);
+            mCloudManagers[c] = cloudManager;
+            c++;
         }
-        
+
         manager.setCloudManagers(mCloudManagers);
-        
+        manager.initClouds();
+
         this.replies = new HashMap<Integer, CloudRepliesControlSet>();
         this.N = credentials.size();
         this.F = 1;
-        this.encoder = new ReedSolEncoder(2, 2, 8);
-        this.decoder = new ReedSolDecoder(2, 2, 8);
-
-        if (!startDrivers()) {
-            System.out.println("Connection Error!");
-        }
+        this.encoder = new ReedSolEncoder(2, 3, 8);
+        this.decoder = new ReedSolDecoder(2, 3, 8);
+        
+        startCloudManagers();
     }
 
     public int getClientId() {
@@ -155,16 +153,16 @@ public class DepSkySClient implements IDepSkySProtocol {
             int nullResponses = 0;
 
             lastReadMetadataSequence = seq;
-            rcs.waitReplies.acquire(); // blocks until this semaphore is released
-            lastReadReplies = rcs.replies;
+            rcs.getWaitReplies().acquire(); // blocks until this semaphore is released
+            lastReadReplies = rcs.getReplies();
             int[] versionReceived = new int[N];
             int maxVerCounter = 0, oldVerCounter = 0;
 
             // process replies to analyze if we get correct responses
-            for (int i = 0; i < rcs.replies.size(); i++) {
-                CloudReply r = rcs.replies.get(i);
-                if (r.mResponse == null || r.mType != DepSkySCloudManager.GET_DATA
-                    || r.mVersionNumber == null || r.mDataUnit == null) {
+            for (int i = 0; i < rcs.getReplies().size(); i++) {
+                CloudReply r = rcs.getReplies().get(i);
+                if (r.getmResponse() == null || r.getmType() != DepSkySCloudManager.GET_DATA
+                    || r.getmVersionNumber() == null || r.getmDataUnit() == null) {
                     nullResponses++;
                     // Fault check #1
                     if (nullResponses > N - F) {
@@ -176,13 +174,13 @@ public class DepSkySClient implements IDepSkySProtocol {
                         throw new Exception("READ ERROR: at least f + 1 clouds failed");
                     }
                 } else {
-                    Long maxVersionFound = r.mDataUnit.getMaxVersion();
+                    Long maxVersionFound = r.getmDataUnit().getMaxVersion();
                     // process replies
                     if (reg.isPVSS()) {
                         // Data Unit using PVSS (retuns when having f + 1 sequential replies with
                         // maxVersionFound)
-                        if (r.mDataUnit.getMaxVersion() == null
-                            || maxVersionFound.longValue() == Long.parseLong(r.mVersionNumber)) {
+                        if (r.getmDataUnit().getMaxVersion() == null
+                            || maxVersionFound.longValue() == Long.parseLong(r.getmVersionNumber())) {
                             // have max version
                             versionReceived[i] = 1;
                             maxVerCounter++;
@@ -191,13 +189,13 @@ public class DepSkySClient implements IDepSkySProtocol {
                             versionReceived[i] = 2;
                             oldVerCounter++;
                         }
-                        reg = r.mDataUnit;
+                        reg = r.getmDataUnit();
                     } else {
                         // Data Unit NOT using PVSS (returns first reply with maxVersionFound in metadata)
-                        if (maxVersionFound.longValue() == Long.parseLong(r.mVersionNumber)) {
+                        if (maxVersionFound.longValue() == Long.parseLong(r.getmVersionNumber())) {
                             // reg.clearAllCaches();
                             lastReadRepliesMaxVerIdx = i;
-                            return (byte[])r.mResponse;
+                            return (byte[])r.getmResponse();
                         }
                     }
                 }
@@ -208,19 +206,19 @@ public class DepSkySClient implements IDepSkySProtocol {
             Map<String, byte[]> erasurec = new HashMap<>();
             if (reg.isErsCodes() || reg.isSecSharing() || reg.isPVSS()) {
 
-                for (int i = 0; i < rcs.replies.size(); i++) {
+                for (int i = 0; i < rcs.getReplies().size(); i++) {
                     if (maxVerCounter >= T && versionReceived[i] != 1) {
-                        CloudReply resp = rcs.replies.get(i);
+                        CloudReply resp = rcs.getReplies().get(i);
                         resp.invalidateResponse();
                     } else if (oldVerCounter >= T && versionReceived[i] != 2) {
-                        CloudReply resp = rcs.replies.get(i);
+                        CloudReply resp = rcs.getReplies().get(i);
                         resp.invalidateResponse();
                     }
                 }
-                for (CloudReply r : rcs.replies) {
+                for (CloudReply r : rcs.getReplies()) {
                     int i = 0;
-                    if (r.mResponse != null) {
-                        byte[] ecksobjbytes = (byte[])r.mResponse;
+                    if (r.getmResponse() != null) {
+                        byte[] ecksobjbytes = (byte[])r.getmResponse();
                         ByteArrayInputStream bais = new ByteArrayInputStream(ecksobjbytes);
                         ObjectInputStream ois = new ObjectInputStream(bais);
                         ECKSObject ecksobj;
@@ -256,7 +254,7 @@ public class DepSkySClient implements IDepSkySProtocol {
         } finally {
             parallelRequests = false;
             if (rcs != null) {
-                replies.remove(rcs.sequence);
+                replies.remove(rcs.getSequence());
             }
         }
 
@@ -284,26 +282,26 @@ public class DepSkySClient implements IDepSkySProtocol {
             int nullResponses = 0;
             // process value data responses
             lastReadMetadataSequence = seq;
-            rcs.waitReplies.acquire(); // blocks until this semaphore is released
-            lastReadReplies = rcs.replies;
+            rcs.getWaitReplies().acquire(); // blocks until this semaphore is released
+            lastReadReplies = rcs.getReplies();
             int[] versionReceived = new int[N];
             int maxVerCounter = 0, oldVerCounter = 0;
 
             // process replies to analyze if we get correct responses
-            for (int i = 0; i < rcs.replies.size(); i++) {
-                CloudReply r = rcs.replies.get(i);
-                if (r.mResponse == null || r.mType != DepSkySCloudManager.GET_DATA
-                    || r.mVersionNumber == null || r.mDataUnit == null) {
+            for (int i = 0; i < rcs.getReplies().size(); i++) {
+                CloudReply r = rcs.getReplies().get(i);
+                if (r.getmResponse() == null || r.getmType() != DepSkySCloudManager.GET_DATA
+                    || r.getmVersionNumber() == null || r.getmDataUnit() == null) {
                     nullResponses++;
                     // Fault check #1
                 } else {
-                    Long maxVersionFound = r.mDataUnit.getMaxVersion();
+                    Long maxVersionFound = r.getmDataUnit().getMaxVersion();
                     // process replies
                     if (reg.isPVSS()) {
                         // Data Unit using PVSS (retuns when having f + 1 sequential replies with
                         // maxVersionFound)
-                        if (r.mDataUnit.getMaxVersion() == null
-                            || maxVersionFound.longValue() == Long.parseLong(r.mVersionNumber)) {
+                        if (r.getmDataUnit().getMaxVersion() == null
+                            || maxVersionFound.longValue() == Long.parseLong(r.getmVersionNumber())) {
                             // have max version
                             versionReceived[i] = 1;
                             maxVerCounter++;
@@ -314,9 +312,9 @@ public class DepSkySClient implements IDepSkySProtocol {
                         }
                     } else {
                         // Data Unit NOT using PVSS (returns first reply with maxVersionFound in metadata)
-                        if (maxVersionFound.longValue() == Long.parseLong(r.mVersionNumber)) {
+                        if (maxVersionFound.longValue() == Long.parseLong(r.getmVersionNumber())) {
                             lastReadRepliesMaxVerIdx = i;
-                            return (byte[])r.mResponse; // using DepSky-A
+                            return (byte[])r.getmResponse(); // using DepSky-A
                         }
                     }
                 }
@@ -335,20 +333,20 @@ public class DepSkySClient implements IDepSkySProtocol {
             Map<String, byte[]> erasurec = new HashMap<>();
             if (reg.isErsCodes() || reg.isSecSharing() || reg.isPVSS()) {
 
-                for (int i = 0; i < rcs.replies.size(); i++) {
+                for (int i = 0; i < rcs.getReplies().size(); i++) {
                     if (maxVerCounter >= T && versionReceived[i] != 1) {
-                        CloudReply resp = rcs.replies.get(i);
+                        CloudReply resp = rcs.getReplies().get(i);
                         resp.invalidateResponse();
                     } else if (oldVerCounter >= T && versionReceived[i] != 2) {
-                        CloudReply resp = rcs.replies.get(i);
+                        CloudReply resp = rcs.getReplies().get(i);
                         resp.invalidateResponse();
                     }
                 }
 
-                for (CloudReply r : rcs.replies) {
+                for (CloudReply r : rcs.getReplies()) {
                     int i = 0;
-                    if (r.mResponse != null) {
-                        byte[] ecksobjbytes = (byte[])r.mResponse;
+                    if (r.getmResponse() != null) {
+                        byte[] ecksobjbytes = (byte[])r.getmResponse();
                         ByteArrayInputStream bais = new ByteArrayInputStream(ecksobjbytes);
                         ObjectInputStream ois = new ObjectInputStream(bais);
                         ECKSObject ecksobj;
@@ -383,7 +381,7 @@ public class DepSkySClient implements IDepSkySProtocol {
         } finally {
             parallelRequests = false;
             if (rcs != null) {
-                replies.remove(rcs.sequence);
+                replies.remove(rcs.getSequence());
             }
         }
     }
@@ -402,8 +400,8 @@ public class DepSkySClient implements IDepSkySProtocol {
             rcs = new CloudRepliesControlSet(N, seq);
             replies.put(seq, rcs);
             broadcastGetMetadata(seq, reg, DepSkySManager.DELETE_ALL, null);
-            rcs.waitReplies.acquire();
-            lastMetadataReplies = rcs.replies;
+            rcs.getWaitReplies().acquire();
+            lastMetadataReplies = rcs.getReplies();
 
         } catch (InterruptedException e) {
             e.printStackTrace();
@@ -430,21 +428,21 @@ public class DepSkySClient implements IDepSkySProtocol {
             replies.put(seq, rcs);
             // broadcast to all clouds to get the Metadata associated with this dataUnit
             broadcastGetMetadata(seq, reg, DepSkySManager.WRITE_PROTO, null);
-            rcs.waitReplies.acquire(); // blocks until the semaphore is released
-            lastMetadataReplies = rcs.replies;
+            rcs.getWaitReplies().acquire(); // blocks until the semaphore is released
+            lastMetadataReplies = rcs.getReplies();
             // process replies and actualize version
             int nullCounter = 0;
             long maxVersionFound = -1;
 
             // proccess metadata replies
-            for (int i = 0; i < rcs.replies.size(); i++) {
-                CloudReply r = rcs.replies.get(i);
-                if (r.mResponse == null || r.mType != DepSkySCloudManager.GET_DATA
-                    || r.mVersionNumber == null) {
+            for (int i = 0; i < rcs.getReplies().size(); i++) {
+                CloudReply r = rcs.getReplies().get(i);
+                if (r.getmResponse() == null || r.getmType() != DepSkySCloudManager.GET_DATA
+                    || r.getmVersionNumber() == null) {
                     nullCounter++;
                     continue;
                 } else {
-                    long version = Long.parseLong(r.mVersionNumber);
+                    long version = Long.parseLong(r.getmVersionNumber());
                     if (version > maxVersionFound) {
                         maxVersionFound = version;
                     }
@@ -477,8 +475,8 @@ public class DepSkySClient implements IDepSkySProtocol {
                 broadcastWriteValueRequests(seq, reg, value, nextVersion + "", allDataHash);
             }
 
-            wrcs.waitReplies.acquire();
-            lastReadReplies = wrcs.replies;
+            wrcs.getWaitReplies().acquire();
+            lastReadReplies = wrcs.getReplies();
 
             reg.lastVersionNumber = nextVersion;
             return allDataHash;
@@ -504,19 +502,19 @@ public class DepSkySClient implements IDepSkySProtocol {
             rcs = new CloudRepliesControlSet(N, seq);
             replies.put(seq, rcs);
             broadcastGetMetadata(seq, reg, DepSkySManager.ACL_PROTO, null);
-            rcs.waitReplies.acquire();
-            lastMetadataReplies = rcs.replies;
+            rcs.getWaitReplies().acquire();
+            lastMetadataReplies = rcs.getReplies();
             // process replies and actualize version
             int nullCounter = 0;
             long maxVersionFound = -1;
-            for (int i = 0; i < rcs.replies.size(); i++) {
-                CloudReply r = rcs.replies.get(i);
-                if (r.mResponse == null || r.mType != DepSkySCloudManager.GET_DATA
-                    || r.mVersionNumber == null) {
+            for (int i = 0; i < rcs.getReplies().size(); i++) {
+                CloudReply r = rcs.getReplies().get(i);
+                if (r.getmResponse() == null || r.getmType() != DepSkySCloudManager.GET_DATA
+                    || r.getmVersionNumber() == null) {
                     nullCounter++;
                     continue;
                 } else {
-                    long version = Long.parseLong(r.mVersionNumber);
+                    long version = Long.parseLong(r.getmVersionNumber());
                     if (version > maxVersionFound) {
                         maxVersionFound = version;
                     }
@@ -532,8 +530,8 @@ public class DepSkySClient implements IDepSkySProtocol {
             broadcastSetContainersACL(seq, reg, DepSkySManager.ACL_PROTO, maxVersionFound, permission,
                 cannonicalIds);
 
-            wrcs.waitReplies.acquire();
-            lastReadReplies = wrcs.replies;
+            wrcs.getWaitReplies().acquire();
+            lastReadReplies = wrcs.getReplies();
 
         } catch (Exception ex) {
             // System.out.println("DEPSKYS WRITE ERROR: " + ex.getMessage());
@@ -552,59 +550,65 @@ public class DepSkySClient implements IDepSkySProtocol {
      */
     public void dataReceived(CloudReply reply) {
 
-        if (!replies.containsKey(reply.mSequenceNumber)) {
+        if (!replies.containsKey(reply.getmSequenceNumber())) {
             // System.out.println("NOTE: sequence " + reply.sequence
             // + " replies already removed - " + reply);
             return;
         }
 
-        CloudRepliesControlSet rcs = replies.get(reply.mSequenceNumber);
+        CloudRepliesControlSet rcs = replies.get(reply.getmSequenceNumber());
 
         if (rcs != null) {
-            rcs.replies.add(reply);
+            rcs.getReplies().add(reply);
         } else {
             return;
         }
 
         // individual test measures (only add reply)
-        if (reply.mSequenceNumber < 0) {
+        if (reply.getmSequenceNumber() < 0) {
             return;
         }
 
         // processing reply
-        if (reply.mProtoOp == DepSkySManager.ACL_PROTO) {
-            if (rcs.replies.size() == 4) {
-                rcs.waitReplies.release();
+        if (reply.getmProtoOp() == DepSkySManager.ACL_PROTO) {
+            if (rcs.getReplies().size() == 4) {
+                rcs.getWaitReplies().release();
             }
-        } else if (reply.mProtoOp == DepSkySManager.READ_PROTO && reply.mVersionNumber.equals("true")
-            && rcs.replies.size() >= N - F) { // read quorum when is a single file (written with operation
-                                              // writeQuorum)
-            rcs.waitReplies.release();
+        } else if (reply.getmProtoOp() == DepSkySManager.READ_PROTO
+            && reply.getmVersionNumber().equals("true") && rcs.getReplies().size() >= N - F) { // read quorum
+                                                                                               // when is a
+                                                                                               // single file
+                                                                                               // (written
+                                                                                               // with
+                                                                                               // operation
+            // writeQuorum)
+            rcs.getWaitReplies().release();
 
-        } else if (reply.mProtoOp == DepSkySManager.READ_PROTO && reply.mDataUnit != null
-            && reply.mDataUnit.cloudVersions != null && reply.mDataUnit.cloudVersions.size() >= (N - F)
-            && rcs.replies != null && rcs.replies.size() > 0 && !reply.mDataUnit.isPVSS()
-            && !reply.mIsMetadataFile) {
+        } else if (reply.getmProtoOp() == DepSkySManager.READ_PROTO && reply.getmDataUnit() != null
+            && reply.getmDataUnit().cloudVersions != null
+            && reply.getmDataUnit().cloudVersions.size() >= (N - F) && rcs.getReplies() != null
+            && rcs.getReplies().size() > 0 && !reply.getmDataUnit().isPVSS() && !reply.ismIsMetadataFile()) {
             // normal & optimized read trigger (reg without PVSS)
-            Long maxVersion = reply.mDataUnit.getMaxVersion();
-            Long foundVersion = reply.mDataUnit.getCloudVersion(reply.mProviderId);
+            Long maxVersion = reply.getmDataUnit().getMaxVersion();
+            Long foundVersion = reply.getmDataUnit().getCloudVersion(reply.getmProviderId());
             if (maxVersion != null && maxVersion.longValue() == foundVersion.longValue()) {
-                rcs.waitReplies.release();
+                rcs.getWaitReplies().release();
                 return;
             } else {
                 // System.out.println(reply.cloudId + " does not have max version "
                 // + maxVersion + " but has " + foundVersion);
             }
-        } else if (reply.mProtoOp == DepSkySManager.READ_PROTO && reply.mDataUnit != null
-            && reply.mDataUnit.cloudVersions != null && reply.mDataUnit.cloudVersions.size() >= (N - F)
-            && reply.mDataUnit.isPVSS() && rcs.replies != null && rcs.replies.size() > F) {
+        } else if (reply.getmProtoOp() == DepSkySManager.READ_PROTO && reply.getmDataUnit() != null
+            && reply.getmDataUnit().cloudVersions != null
+            && reply.getmDataUnit().cloudVersions.size() >= (N - F) && reply.getmDataUnit().isPVSS()
+            && rcs.getReplies() != null && rcs.getReplies().size() > F) {
             // SecretSharing read trigger (reg with PVSS)
-            Long maxVersion = reply.mDataUnit.getMaxVersion();
+            Long maxVersion = reply.getmDataUnit().getMaxVersion();
             int maxcounter = 0, othercounter = 0;
-            for (int i = 0; i < rcs.replies.size(); i++) {
-                CloudReply r = rcs.replies.get(i);
-                if (r.mResponse != null && maxVersion != null
-                    && Long.parseLong(r.mVersionNumber) == maxVersion.longValue()) {
+            for (int i = 0; i < rcs.getReplies().size(); i++) {
+                CloudReply r = rcs.getReplies().get(i);
+                if (r.getmResponse() != null && maxVersion != null
+                    && Long.parseLong(r.getmVersionNumber()) == maxVersion.longValue()) {
                     maxcounter++;
                 } else {
                     othercounter++;
@@ -612,34 +616,34 @@ public class DepSkySClient implements IDepSkySProtocol {
             }
             // check release -> have F + 1 shares of same version
             if (maxcounter > F || othercounter > F) {
-                rcs.waitReplies.release();
+                rcs.getWaitReplies().release();
                 return;
             }
-        } else if (reply.mProtoOp == DepSkySManager.READ_PROTO && rcs.replies.size() >= N - F) {
+        } else if (reply.getmProtoOp() == DepSkySManager.READ_PROTO && rcs.getReplies().size() >= N - F) {
             int nonNull = 0, nulls = 0;
-            for (int i = 0; i < rcs.replies.size(); i++) {
-                if (rcs.replies.get(i).mResponse != null) {
+            for (int i = 0; i < rcs.getReplies().size(); i++) {
+                if (rcs.getReplies().get(i).getmResponse() != null) {
                     nonNull++;
                 } else {
                     nulls++;
                 }
             }
             // release wait messages semaphore
-            if (nonNull >= N - F || rcs.replies.size() > N - F || nulls > N - 2) {
-                rcs.waitReplies.release();
+            if (nonNull >= N - F || rcs.getReplies().size() > N - F || nulls > N - 2) {
+                rcs.getWaitReplies().release();
                 return;
             }
-        } else if (reply.mProtoOp >= DepSkySManager.WRITE_PROTO && rcs.replies.size() >= N - F
-            && reply.mDataUnit != null) {
+        } else if (reply.getmProtoOp() >= DepSkySManager.WRITE_PROTO && rcs.getReplies().size() >= N - F
+            && reply.getmDataUnit() != null) {
             // write trigger (writes in all clouds)
-            rcs.waitReplies.release();
+            rcs.getWaitReplies().release();
             return;
         }
 
         // wait 4 replies when is about the start of the connections with the clouds and the delete operation
-        if (rcs.replies.size() > N - F && reply.mProtoOp != DepSkySManager.WRITE_PROTO) {
-            rcs.waitReplies.release();
-            replies.remove(rcs.sequence);
+        if (rcs.getReplies().size() > N - F && reply.getmProtoOp() != DepSkySManager.WRITE_PROTO) {
+            rcs.getWaitReplies().release();
+            replies.remove(rcs.getSequence());
         }
 
     }
@@ -652,40 +656,16 @@ public class DepSkySClient implements IDepSkySProtocol {
      * Start all connections with the clouds (this operations only get success if all the four
      * connections are performed correctly)
      * 
-     * @return true if all the connections are correct, false otherwise
      */
-    private boolean startDrivers() {
+    private void startCloudManagers() {
         System.out.println("starting drivers...");
 
-        int seq = getNextSequence();
-        CloudRepliesControlSet rcs = new CloudRepliesControlSet(N, seq);
-        replies.put(seq, rcs);
-        for (int i = 0; i < 4; i++)
-            manager.mCloudManagers[i].doRequest(new CloudRequest(DepSkySCloudManager.INIT_SESS, seq, null,
-                null, null, null, new Properties(), null, -1, false, null));
-
-        try {
-            rcs.waitReplies.acquire();
-        } catch (InterruptedException e) {
-            // erro sem�foro
-        }
-        int nullCounter = 0;
-        for (int i = 0; i < rcs.replies.size(); i++) {
-            CloudReply r = rcs.replies.get(i);
-            if (r.mResponse == null) {
-                System.out.println("erro na cloud " + r.mProviderId);
-                nullCounter++;
-                if (nullCounter > 0) {
-                    System.out.println("ERROR: drivers initialization failed");
-                    return false;
-                }
-            }
+        mCloudService = Executors.newFixedThreadPool(4);
+        for (DepSkySCloudManager manager : mCloudManagers) {
+            mCloudService.submit(manager);
         }
 
-        replies.remove(rcs.sequence);
         System.out.println("All drivers started.");
-
-        return true;
     }
 
     /*
@@ -745,16 +725,19 @@ public class DepSkySClient implements IDepSkySProtocol {
             rcs = new CloudRepliesControlSet(N, seq);
             replies.put(seq, rcs);
 
-            for (int i = 0; i < drivers.length; i++) {
+            for (int i = 0; i < mCloudManagers.length; i++) {
                 CloudRequest r =
-                    new CloudRequest(DepSkySCloudManager.NEW_DATA, sequence, drivers[i].getSessionKey(), reg
-                        .getContainerId(drivers[i].getDriverId()), filename, value, null, reg,
-                        DepSkySManager.WRITE_PROTO, true, null, null, null); // allmetadata no ultimo
-                                                                             // parametro
-                manager.doRequest(drivers[i].getDriverId(), r);
+                    new CloudRequest(DepSkySCloudManager.NEW_DATA, reg.getContainerId(mCloudManagers[i]
+                        .getCloudId()), filename, System.currentTimeMillis());
+                r.setmSeqNumber(sequence);
+                r.setmW_data(value);
+                r.setReg(reg);
+                r.setmProtoOp(DepSkySManager.WRITE_PROTO);
+                r.setmIsMetadataFile(true);
+                manager.doRequest(mCloudManagers[i].getCloudId(), r);
             }
 
-            rcs.waitReplies.acquire();
+            rcs.getWaitReplies().acquire();
         } catch (Exception e) {
 
         }
@@ -769,25 +752,22 @@ public class DepSkySClient implements IDepSkySProtocol {
             rcs = new CloudRepliesControlSet(N, seq);
             replies.put(seq, rcs);
 
-            for (int i = 0; i < drivers.length; i++) {
+            for (int i = 0; i < mCloudManagers.length; i++) {
                 CloudRequest r =
-                    new CloudRequest(DepSkySCloudManager.GET_DATA, sequence, drivers[i].getSessionKey(), reg
-                        .getContainerId(drivers[i].getDriverId()), filename, null, null, reg,
-                        DepSkySManager.READ_PROTO, false, "true", null, null); // allmetadata no ultimo
-                                                                               // parametro
-                manager.doRequest(drivers[i].getDriverId(), r);
-
-                // CloudRequest r = new CloudRequest(DepSkySCloudManager.GET_DATA, sequence,
-                // drivers[i].getSessionKey(), reg.getContainerId(drivers[i].getDriverId()), filename,
-                // null, null, reg, DepSkySManager.READ_PROTO, false, null);
+                    new CloudRequest(DepSkySCloudManager.GET_DATA, reg.getContainerId(mCloudManagers[i]
+                        .getCloudId()), filename, System.currentTimeMillis());
+                r.setmSeqNumber(sequence);
+                r.setReg(reg);
+                r.setmProtoOp(DepSkySManager.READ_PROTO);
+                manager.doRequest(mCloudManagers[i].getCloudId(), r);
             }
 
-            rcs.waitReplies.acquire();
+            rcs.getWaitReplies().acquire();
             LinkedList<byte[]> readvalue = new LinkedList<byte[]>();
-            for (int i = 0; i < rcs.replies.size(); i++) {
-                CloudReply r = rcs.replies.get(i);
-                if (r.mVersionNumber.equals("true") && r.mResponse != null) {
-                    byte[] data = (byte[])r.mResponse;
+            for (int i = 0; i < rcs.getReplies().size(); i++) {
+                CloudReply r = rcs.getReplies().get(i);
+                if (r.getmVersionNumber().equals("true") && r.getmResponse() != null) {
+                    byte[] data = (byte[])r.getmResponse();
                     readvalue.add(data);
                 }
             }
@@ -799,7 +779,7 @@ public class DepSkySClient implements IDepSkySProtocol {
     }
 
     // to be utilized by the lock algorithm
-    private LinkedList<LinkedList<String>> listQuorum(DepSkySDataUnit reg, String prefix) throws Exception {
+    private LinkedList<LinkedList<String>> listQuorum(DepSkySDataUnit reg) throws Exception {
 
         CloudRepliesControlSet rcs = null;
         try {
@@ -807,27 +787,30 @@ public class DepSkySClient implements IDepSkySProtocol {
             rcs = new CloudRepliesControlSet(N, seq);
             replies.put(seq, rcs);
 
-            for (int i = 0; i < drivers.length; i++) {
+            for (int i = 0; i < mCloudManagers.length; i++) {
                 CloudRequest r =
-                    new CloudRequest(DepSkySCloudManager.LIST, seq, drivers[i].getSessionKey(), reg
-                        .getContainerName(), prefix, null, null, reg, -1, true, null);
-                manager.doRequest(drivers[i].getDriverId(), r);
+                    new CloudRequest(DepSkySCloudManager.LIST, reg.getContainerId(mCloudManagers[i]
+                        .getCloudId()), "", System.currentTimeMillis());
+                r.setmSeqNumber(sequence);
+                r.setmIsMetadataFile(true);
+                r.setReg(reg);
+                manager.doRequest(mCloudManagers[i].getCloudId(), r);
             }
 
             LinkedList<LinkedList<String>> listPerClouds = new LinkedList<LinkedList<String>>();
-            rcs.waitReplies.acquire();
+            rcs.getWaitReplies().acquire();
             int nullcounter = 0;
-            for (int i = 0; i < rcs.replies.size(); i++) {
-                CloudReply r = rcs.replies.get(i);
+            for (int i = 0; i < rcs.getReplies().size(); i++) {
+                CloudReply r = rcs.getReplies().get(i);
 
-                if (r.mListNames == null) {
+                if (r.getmListNames() == null) {
                     nullcounter++;
                 } else {
-                    listPerClouds.add(r.mListNames);
+                    listPerClouds.add(r.getmListNames());
                 }
             }
             if (nullcounter > N) {
-                throw new Exception("sfdsdf");
+                throw new Exception("No cloud responded to the request.");
             }
             return listPerClouds;
 
@@ -846,13 +829,16 @@ public class DepSkySClient implements IDepSkySProtocol {
             rcs = new CloudRepliesControlSet(N, seq);
             replies.put(seq, rcs);
 
-            for (int i = 0; i < drivers.length; i++) {
+            for (int i = 0; i < mCloudManagers.length; i++) {
                 CloudRequest r =
-                    new CloudRequest(DepSkySCloudManager.DEL_DATA, seq, drivers[i].getSessionKey(), reg
-                        .getContainerName(), name, null, null, reg, -1, true, null);
-                manager.doRequest(drivers[i].getDriverId(), r);
+                    new CloudRequest(DepSkySCloudManager.DEL_DATA, reg.getContainerId(mCloudManagers[i]
+                        .getCloudId()), name, System.currentTimeMillis());
+                r.setmSeqNumber(sequence);
+                r.setmIsMetadataFile(true);
+                r.setReg(reg);
+                manager.doRequest(mCloudManagers[i].getCloudId(), r);
             }
-            rcs.waitReplies.acquire();
+            rcs.getWaitReplies().acquire();
 
         } catch (Exception e) {
 
@@ -865,51 +851,56 @@ public class DepSkySClient implements IDepSkySProtocol {
      */
     private void broadcastGetMetadata(int sequence, DepSkySDataUnit reg, int protoOp, byte[] hashMatching) {
 
-        for (int i = 0; i < drivers.length; i++) {
+        for (int i = 0; i < mCloudManagers.length; i++) {
             CloudRequest r =
-                new CloudRequest(DepSkySCloudManager.GET_DATA, sequence, drivers[i].getSessionKey(), reg
-                    .getContainerName(), reg.getMetadataFileName(), null, null, reg, protoOp, true,
-                    hashMatching);
-
-            if (reg.getContainerId(drivers[i].getDriverId()) == null) {
-                reg.setContainerId(drivers[i].getDriverId(), reg.getContainerName());
+                new CloudRequest(DepSkySCloudManager.GET_DATA, reg.getContainerName(), reg
+                    .getMetadataFileName(), System.currentTimeMillis());
+            r.setmSeqNumber(sequence);
+            r.setmProtoOp(protoOp);
+            r.setmHashMatching(hashMatching);
+            r.setmIsMetadataFile(true);
+            r.setReg(reg);
+            if (reg.getContainerId(mCloudManagers[i].getCloudId()) == null) {
+                reg.setContainerId(mCloudManagers[i].getCloudId(), reg.getContainerName());
             }
-            manager.doRequest(drivers[i].getDriverId(), r);
+            manager.doRequest(mCloudManagers[i].getCloudId(), r);
         }
 
     }
 
     /**
+     * TODO: adapt to jclouds
      * NOT CURRENTLY USED
      */
     private void broadcastSetContainersACL(int sequence, DepSkySDataUnit reg, int protoOp, long version,
         String permission, LinkedList<Pair<String, String>> cannonicalIds) {
 
-        for (int i = 0; i < drivers.length; i++) {
-            Pair<String, String> pair = cannonicalIds.get(i);
-            if (drivers[i] instanceof AmazonS3Driver && pair.getKey().equals("AMAZON-S3")) {
-                perDriverAclRequest(sequence, reg, protoOp, version, i, permission, pair.getValue());
-            } else if (drivers[i] instanceof GoogleStorageDriver && pair.getKey().equals("GOOGLE-STORAGE")) {
-                perDriverAclRequest(sequence, reg, protoOp, version, i, permission, pair.getValue());
-            } else if (drivers[i] instanceof WindowsAzureDriver && pair.getKey().equals("WINDOWS-AZURE")) {
-                perDriverAclRequest(sequence, reg, protoOp, version, i, permission, pair.getValue());
-            } else if (drivers[i] instanceof RackSpaceDriver && pair.getKey().equals("RACKSPACE")) {
-                perDriverAclRequest(sequence, reg, protoOp, version, i, permission, pair.getValue());
-            }
-        }
+        // for (int i = 0; i < drivers.length; i++) {
+        // Pair<String, String> pair = cannonicalIds.get(i);
+        // if (drivers[i] instanceof AmazonS3Driver && pair.getKey().equals("AMAZON-S3")) {
+        // perDriverAclRequest(sequence, reg, protoOp, version, i, permission, pair.getValue());
+        // } else if (drivers[i] instanceof GoogleStorageDriver && pair.getKey().equals("GOOGLE-STORAGE")) {
+        // perDriverAclRequest(sequence, reg, protoOp, version, i, permission, pair.getValue());
+        // } else if (drivers[i] instanceof WindowsAzureDriver && pair.getKey().equals("WINDOWS-AZURE")) {
+        // perDriverAclRequest(sequence, reg, protoOp, version, i, permission, pair.getValue());
+        // } else if (drivers[i] instanceof RackSpaceDriver && pair.getKey().equals("RACKSPACE")) {
+        // perDriverAclRequest(sequence, reg, protoOp, version, i, permission, pair.getValue());
+        // }
+        // }
     }
 
     /**
+     * TODO: adapt to jclouds
      * NOT CURRENTLY USED
      */
     private void perDriverAclRequest(int sequence, DepSkySDataUnit reg, int protoOp, long version,
         int driverPosition, String permission, String canonicalId) {
 
-        CloudRequest r =
-            new CloudRequest(DepSkySCloudManager.SET_ACL, sequence, drivers[driverPosition].getSessionKey(),
-                reg.getContainerName(), reg.getGivenVersionValueDataFileName(version + ""), reg, protoOp,
-                permission, canonicalId);
-        manager.doRequest(drivers[driverPosition].getDriverId(), r);
+        // CloudRequest r =
+        // new CloudRequest(DepSkySCloudManager.SET_ACL, sequence, drivers[driverPosition].getSessionKey(),
+        // reg.getContainerName(), reg.getGivenVersionValueDataFileName(version + ""), reg, protoOp,
+        // permission, canonicalId);
+        // manager.doRequest(drivers[driverPosition].getDriverId(), r);
     }
 
     /*
@@ -917,12 +908,18 @@ public class DepSkySClient implements IDepSkySProtocol {
      */
     private void broadcastWriteValueRequests(int sequence, DepSkySDataUnit reg, byte[] value, String version,
         byte[] allDataHash) {
-        for (int i = 0; i < drivers.length; i++) {
+
+        for (int i = 0; i < mCloudManagers.length; i++) {
             CloudRequest r =
-                new CloudRequest(DepSkySCloudManager.NEW_DATA, sequence, drivers[i].getSessionKey(), reg
-                    .getContainerId(drivers[i].getDriverId()), reg.getGivenVersionValueDataFileName(version),
-                    value, null, reg, DepSkySManager.WRITE_PROTO, false, version, null, allDataHash);
-            manager.doRequest(drivers[i].getDriverId(), r);
+                new CloudRequest(DepSkySCloudManager.NEW_DATA, reg.getContainerName(), reg
+                    .getGivenVersionValueDataFileName(version), System.currentTimeMillis());
+            r.setmSeqNumber(sequence);
+            r.setmProtoOp(DepSkySManager.WRITE_PROTO);
+            r.setmAllDataHash(allDataHash);
+            r.setmVersionNumber(version);
+            r.setmW_data(value);
+            r.setReg(reg);
+            manager.doRequest(mCloudManagers[i].getCloudId(), r);
         }
     }
 
@@ -946,7 +943,7 @@ public class DepSkySClient implements IDepSkySProtocol {
         ByteArrayOutputStream data2write;
         ObjectOutputStream oos;
         Object[] ec_fnames = valueErasureCodes.keySet().toArray();
-        for (int i = 0; i < drivers.length; i++) {
+        for (int i = 0; i < mCloudManagers.length; i++) {
             data2write = new ByteArrayOutputStream();
             oos = new ObjectOutputStream(data2write);
             String ec_filename = (String)ec_fnames[i];
@@ -955,11 +952,15 @@ public class DepSkySClient implements IDepSkySProtocol {
             oos.close();
             // send request
             CloudRequest r =
-                new CloudRequest(DepSkySCloudManager.NEW_DATA, sequence, drivers[i].getSessionKey(), reg
-                    .getContainerId(drivers[i].getDriverId()), reg.getGivenVersionValueDataFileName(version),
-                    data2write.toByteArray(), null, reg, DepSkySManager.WRITE_PROTO, false, version, null,
-                    allDataHash);
-            manager.doRequest(drivers[i].getDriverId(), r);
+                new CloudRequest(DepSkySCloudManager.NEW_DATA, reg.getContainerName(), reg
+                    .getGivenVersionValueDataFileName(version), System.currentTimeMillis());
+            r.setmSeqNumber(sequence);
+            r.setmProtoOp(DepSkySManager.WRITE_PROTO);
+            r.setmAllDataHash(allDataHash);
+            r.setmVersionNumber(version);
+            r.setReg(reg);
+            r.setmW_data(data2write.toByteArray());
+            manager.doRequest(mCloudManagers[i].getCloudId(), r);
         }
 
     }
@@ -969,7 +970,6 @@ public class DepSkySClient implements IDepSkySProtocol {
      */
     private void broadcastWriteValueErasureCodes(int sequence, DepSkySDataUnit reg, byte[] value,
         String version, byte[] allDataHash) throws Exception {
-
         Map<String, byte[]> valueErasureCodes = encoder.encode(value);
         byte[] metabytes = valueErasureCodes.get("metadata");
         valueErasureCodes.remove("metadata");
@@ -980,7 +980,8 @@ public class DepSkySClient implements IDepSkySProtocol {
         ObjectOutputStream oos;
         Object[] ec_fnames = valueErasureCodes.keySet().toArray();
         String aux = "";
-        for (int i = 0; i < drivers.length; i++) {
+
+        for (int i = 0; i < mCloudManagers.length; i++) {
             data2write = new ByteArrayOutputStream();
             oos = new ObjectOutputStream(data2write);
             String ec_filename = (String)ec_fnames[i];
@@ -988,18 +989,25 @@ public class DepSkySClient implements IDepSkySProtocol {
             oos.writeObject(obj);
             oos.close();
             // send request
-            aux = reg.getContainerId(drivers[i].getDriverId());
+
+            aux = reg.getContainerId(mCloudManagers[i].getCloudId());
             if (aux == null) {
-                for (int j = 0; j < drivers.length; j++) {
-                    if (reg.getContainerId(drivers[j].getDriverId()) != null)
-                        aux = reg.getContainerId(drivers[j].getDriverId());
+                for (int j = 0; j < mCloudManagers.length; j++) {
+                    if (reg.getContainerId(mCloudManagers[j].getCloudId()) != null)
+                        aux = reg.getContainerId(mCloudManagers[j].getCloudId());
                 }
             }
+
             CloudRequest r =
-                new CloudRequest(DepSkySCloudManager.NEW_DATA, sequence, drivers[i].getSessionKey(), aux, reg
-                    .getGivenVersionValueDataFileName(version), data2write.toByteArray(), null, reg,
-                    DepSkySManager.WRITE_PROTO, false, version, null, allDataHash);
-            manager.doRequest(drivers[i].getDriverId(), r);
+                new CloudRequest(DepSkySCloudManager.NEW_DATA, aux, reg
+                    .getGivenVersionValueDataFileName(version), System.currentTimeMillis());
+            r.setmSeqNumber(sequence);
+            r.setmProtoOp(DepSkySManager.WRITE_PROTO);
+            r.setmAllDataHash(allDataHash);
+            r.setmVersionNumber(version);
+            r.setReg(reg);
+            r.setmW_data(data2write.toByteArray());
+            manager.doRequest(mCloudManagers[i].getCloudId(), r);
         }
     }
 
@@ -1016,8 +1024,7 @@ public class DepSkySClient implements IDepSkySProtocol {
 
         ByteArrayOutputStream data2write;
         ObjectOutputStream oos;
-
-        for (int i = 0; i < drivers.length; i++) {
+        for (int i = 0; i < mCloudManagers.length; i++) {
             data2write = new ByteArrayOutputStream();
             oos = new ObjectOutputStream(data2write);
             ECKSObject obj = new ECKSObject(keyshares[i], ciphValue);
@@ -1025,11 +1032,15 @@ public class DepSkySClient implements IDepSkySProtocol {
             oos.close();
             // send request
             CloudRequest r =
-                new CloudRequest(DepSkySCloudManager.NEW_DATA, sequence, drivers[i].getSessionKey(), reg
-                    .getContainerId(drivers[i].getDriverId()), reg.getGivenVersionValueDataFileName(version),
-                    data2write.toByteArray(), null, reg, DepSkySManager.WRITE_PROTO, false, version, null,
-                    allDataHash);
-            manager.doRequest(drivers[i].getDriverId(), r);
+                new CloudRequest(DepSkySCloudManager.NEW_DATA, reg.getContainerName(), reg
+                    .getGivenVersionValueDataFileName(version), System.currentTimeMillis());
+            r.setmSeqNumber(sequence);
+            r.setmProtoOp(DepSkySManager.WRITE_PROTO);
+            r.setmAllDataHash(allDataHash);
+            r.setmVersionNumber(version);
+            r.setReg(reg);
+            r.setmW_data(data2write.toByteArray());
+            manager.doRequest(mCloudManagers[i].getCloudId(), r);
         }
 
     }
@@ -1104,166 +1115,81 @@ public class DepSkySClient implements IDepSkySProtocol {
      * Read the credentials of drivers accounts
      */
     private List<Account> readCredentials() throws FileNotFoundException, ParseException {
-        InputStream in;
-        try {
-            in = Files.newInputStream(Paths.get("src/main/resources/account.props.yml"));
-            Constructor constructor = new Constructor(Configuration.class);
-            TypeDescription configDescription = new TypeDescription(Configuration.class);
-            configDescription.putListPropertyType("clouds", Account.class);
-            constructor.addTypeDescription(configDescription);
-            Yaml yaml = new Yaml(constructor);
-            Configuration config = (Configuration) yaml.load(in);
-            return config.getAccounts();
-        } catch (IOException e) {
-            return null;
+        InputStream in = null;
+        Yaml yaml = null;
+        Configuration config = null;
+        if (mConfigPath == null) {
+            String yamlPath =
+                new StringBuilder().append("src").append(File.separator).append("main")
+                    .append(File.separator).append("resources").append(File.separator).append(
+                        "account.props.yml").toString();
+            in = new FileInputStream(new File(yamlPath));
         }
+        else{
+            in = new FileInputStream(new File(mConfigPath));
+        }
+        yaml = new Yaml();
+        config = (Configuration)yaml.load(in);
+        return config.getClouds();
     }
 
-    public static void main(String[] args) {
-        if (new Integer(args[0]) <= 6 && new Integer(args[0]) >= 0 && new Integer(args[1]) <= 3
-            && new Integer(args[1]) >= 0 && new Integer(args[2]) <= 1 && new Integer(args[2]) >= 0) {
+    public HashMap<Integer, CloudRepliesControlSet> getReplies() {
+        return replies;
+    }
 
-            System.out.println("USAGE:  commands             function");
-            System.out.println("       pick_du 'name' - change the container");
-            System.out.println("       write 'data'   - write a new version in the selected container");
-            System.out.println("       read           - read the last version of the selected container");
-            System.out.println("       delete         - delete all the files in the selected container");
-            System.out
-                .println("       read_m 'num'   - read old versions. If 'num' = 0 read the last version");
-            System.out.println();
-            boolean useClouds = true;
-            if (new Integer(args[2]) == 1) {
-                useClouds = false;
-            }
+    public void setReplies(HashMap<Integer, CloudRepliesControlSet> replies) {
+        this.replies = replies;
+    }
 
-            DepSkySClient localDS = new DepSkySClient(new Integer(args[0]), useClouds);
-            DepSkySDataUnit dataU = null;
-            int protocol_mode = 0;
-            if (args[1].equals("1")) {
-                protocol_mode = 1;
-            } else if (args[1].equals("2")) {
-                protocol_mode = 2;
-            } else if (args[1].equals("3")) {
-                protocol_mode = 3;
-            }
+    public List<CloudReply> getLastReadReplies() {
+        return lastReadReplies;
+    }
 
-            boolean terminate = false;
-            Scanner in = new Scanner(System.in);
-            String input;
-            byte[] rdata;
-            HashMap<String, LinkedList<byte[]>> map = new HashMap<String, LinkedList<byte[]>>();
-            while (!terminate) {
-                input = in.nextLine();
+    public void setLastReadReplies(List<CloudReply> lastReadReplies) {
+        this.lastReadReplies = lastReadReplies;
+    }
 
-                if (input.length() > 7 && input.substring(0, 7).equals("pick_du")
-                    && input.split(" ").length > 0) {
-                    StringBuilder sb = new StringBuilder(input.substring(8));
-                    dataU = new DepSkySDataUnit(sb.toString());
-                    if (protocol_mode == 1) {
-                        dataU.setUsingPVSS(true);
-                    } else if (protocol_mode == 2) {
-                        dataU.setUsingErsCodes(true);
-                    } else if (protocol_mode == 3) {
-                        dataU.setUsingSecSharing(true);
-                    }
-                    if (!map.containsKey(sb.toString())) {
-                        LinkedList<byte[]> hashs = new LinkedList<byte[]>();
-                        map.put(sb.toString(), hashs);
-                    }
-                    System.out.println("DataUnit '" + sb.toString() + "' selected!");
-                } else {
+    public List<CloudReply> getLastMetadataReplies() {
+        return lastMetadataReplies;
+    }
 
-                    if (dataU != null) {
-                        if (input.equals("delete")) {
-                            try {
-                                localDS.deleteContainer(dataU);
-                                System.out.println("I'm finished delete");
-                            } catch (Exception e) {
-                                e.printStackTrace();
-                            }
-                        } else if (input.equals("read")) {
-                            System.out.println("I'm reading");
-                            try {
-                                dataU.clearAllCaches();
-                                long acMil = System.currentTimeMillis();
-                                rdata = localDS.read(dataU);
+    public void setLastMetadataReplies(List<CloudReply> lastMetadataReplies) {
+        this.lastMetadataReplies = lastMetadataReplies;
+    }
 
-                                // LinkedList<byte[]> data = localDS.readQuorum(dataU, "lockfile");
-                                // for(byte[] b : data)
-                                // System.out.println("read -> " + new String(b));
+    public int getLastReadMetadataSequence() {
+        return lastReadMetadataSequence;
+    }
 
-                                long tempo = System.currentTimeMillis() - acMil;
-                                System.out.println("I'm finished read -> " + Long.toString(tempo) + " milis");
-                                if (rdata != null) {
-                                    System.out.println("READ RESULT = " + new String(rdata));
-                                }
-                            } catch (Exception ex) {
-                                ex.printStackTrace();
-                            }
+    public void setLastReadMetadataSequence(int lastReadMetadataSequence) {
+        this.lastReadMetadataSequence = lastReadMetadataSequence;
+    }
 
-                        } else if (input.substring(0, 5).equals("write") && input.split(" ").length > 0) {
-                            StringBuilder sb = new StringBuilder(input.substring(6));
-                            System.out.println("WRITING: " + sb);
-                            File file = new File(sb.toString());
-                            byte[] value = null;
-                            if (file.exists()) {
-                                FileInputStream reader;
-                                try {
-                                    reader = new FileInputStream(file);
-                                    value = IOUtils.toByteArray(reader);
-                                } catch (FileNotFoundException e) {
-                                    e.printStackTrace();
-                                } catch (IOException e) {
-                                    e.printStackTrace();
-                                }
-                            } else {
-                                value = sb.toString().getBytes();
-                            }
-                            try {
-                                long acMil = System.currentTimeMillis();
+    public int getLastReadRepliesMaxVerIdx() {
+        return lastReadRepliesMaxVerIdx;
+    }
 
-                                byte[] hash = localDS.write(dataU, value);
-                                // localDS.writeQuorum(dataU, value, "lockfile");
-                                LinkedList<byte[]> current = map.get(dataU.getRegId());
-                                current.addFirst(hash);
-                                map.put(dataU.getRegId(), current);
-                                long tempo = System.currentTimeMillis() - acMil;
-                                System.out
-                                    .println("I'm finished write -> " + Long.toString(tempo) + " milis");
-                            } catch (Exception ex) {
-                                ex.printStackTrace();
-                            }
-                        } else if (input.substring(0, 6).equals("read_m") && input.split(" ").length > 0) {
-                            StringBuilder sb = new StringBuilder(input.substring(7));
-                            int ver = new Integer(sb.toString());
-                            System.out.println("I'm reading");
-                            try {
-                                dataU.clearAllCaches();
-                                long acMil = System.currentTimeMillis();
-                                LinkedList<byte[]> current = map.get(dataU.getRegId());
-                                rdata = localDS.readMatching(dataU, current.get(ver));
-                                long tempo = System.currentTimeMillis() - acMil;
-                                System.out.println("I'm finished read -> " + Long.toString(tempo) + " milis");
-                                if (rdata != null) {
-                                    System.out.println("READ RESULT = " + new String(rdata));
-                                }
-                            } catch (Exception ex) {
-                                ex.printStackTrace();
-                            }
+    public void setLastReadRepliesMaxVerIdx(int lastReadRepliesMaxVerIdx) {
+        this.lastReadRepliesMaxVerIdx = lastReadRepliesMaxVerIdx;
+    }
 
-                        } else {
-                            System.out.println("Comando inv�lido!");
-                        }
-                    } else {
-                        System.out.println("You need do pick a container to use. use the command pick_du.");
-                    }
-                }
-            }
-            in.close();
-        } else {
-            System.out.println("Invalid arguments!");
-            System.out
-                .println("Please see the documentation at https://code.google.com/p/depsky/wiki/DepSky.");
-        }
+    public boolean isSentOne() {
+        return sentOne;
+    }
+
+    public void setSentOne(boolean sentOne) {
+        this.sentOne = sentOne;
+    }
+
+    public byte[] getResponse() {
+        return response;
+    }
+
+    public void setResponse(byte[] response) {
+        this.response = response;
+    }
+
+    public void setClientId(int clientId) {
+        this.clientId = clientId;
     }
 }

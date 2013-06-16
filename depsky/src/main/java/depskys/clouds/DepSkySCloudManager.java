@@ -3,6 +3,7 @@ package depskys.clouds;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.Iterables.contains;
 
+import java.io.File;
 import java.util.LinkedList;
 import java.util.Map;
 import java.util.Properties;
@@ -18,6 +19,7 @@ import org.jclouds.blobstore.BlobStoreContext;
 import org.jclouds.blobstore.domain.Blob;
 import org.jclouds.blobstore.domain.PageSet;
 import org.jclouds.blobstore.domain.StorageMetadata;
+import org.jclouds.filesystem.reference.FilesystemConstants;
 import org.jclouds.providers.ProviderMetadata;
 import org.jclouds.providers.Providers;
 
@@ -28,6 +30,7 @@ import com.google.common.io.ByteArrayDataOutput;
 import com.google.common.io.ByteStreams;
 
 import depskys.core.IDepSkySProtocol;
+import depskys.core.configuration.Account;
 
 /**
  * Class that represents all the request and replies for each cloud
@@ -67,10 +70,10 @@ public class DepSkySCloudManager implements Callable<Void> {
     private final BlobStore mBlobStore;
     /** Context for the blobstore binding */
     private final BlobStoreContext mBlobStoreContext;
-    /** Properties for this CloudManager */
-    private final Properties mProperties;
     /** Provider id */
     private final String mProvider;
+    /** Id of the cloud */
+    private final String mCloudId;
     /** Holder for the request in chronological order */
     private LinkedBlockingQueue<CloudRequest> mRequests;
     /** Holder for the replies in chronological order */
@@ -82,21 +85,30 @@ public class DepSkySCloudManager implements Callable<Void> {
     /** Determine whether this manager should terminate or not */
     private boolean mTerminate = false;
 
-    public DepSkySCloudManager(Properties pProperties, ICloudDataManager pCloudDataManager,
+    public DepSkySCloudManager(Account account, ICloudDataManager pCloudDataManager,
         IDepSkySProtocol pDepskys) {
-        mProperties = pProperties;
 
         // Getting the properties
-        String provider = mProvider = mProperties.getProperty("jclouds.provider");
-        String identity = mProperties.getProperty("jclouds.identity");
-        String credential = mProperties.getProperty("jclouds.credential");
+        mProvider = account.getType();
+        String identity = account.getAccessKey();
+        String credential = account.getSecretKey();
+        mCloudId = account.getId();
         // Checking if the provider is valid.
-        checkArgument(contains(allKeys, provider), "provider %s not in supported list: %s", provider, allKeys);
+        checkArgument(contains(allKeys, mProvider), "provider %s not in supported list: %s", mProvider, allKeys);
 
         // Creating the context using the given properties
-        mBlobStoreContext =
-            ContextBuilder.newBuilder(provider).credentials(identity, credential).buildView(
+        if(mProvider.equals("filesystem")){
+            Properties properties = new Properties();
+            properties.setProperty(FilesystemConstants.PROPERTY_BASEDIR, new StringBuilder().append("local").append(File.separator).append("filesystem" + mCloudId).toString());
+            mBlobStoreContext =
+            ContextBuilder.newBuilder(mProvider).credentials(identity, credential).overrides(properties).buildView(
                 BlobStoreContext.class);
+        }
+        else{
+            mBlobStoreContext =
+                ContextBuilder.newBuilder(mProvider).credentials(identity, credential).buildView(
+                    BlobStoreContext.class);
+        }
         
         // Create Container
         mBlobStore = mBlobStoreContext.getBlobStore();
@@ -116,8 +128,8 @@ public class DepSkySCloudManager implements Callable<Void> {
                     return null;
                 } else {
                     // Each process method will block automatically if no elements are available.
-                    processReply(); // Process next reply in queue
                     processRequest(); // Process next request in queue
+                    processReply(); // Process next reply in queue
                 }
         }
     }
@@ -176,10 +188,15 @@ public class DepSkySCloudManager implements Callable<Void> {
                 ByteArrayDataOutput out = ByteStreams.newDataOutput();
                 message.serialize(out);
                 
+                if(!mBlobStore.containerExists(request.getmContainerName())){
+                    mBlobStore.createContainerInLocation(null, request.getmContainerName());
+                }
+                
                 blob = mBlobStore.blobBuilder(request.getmDataFileName()).payload(out.toByteArray()).build();
+                putBlobMeta(blob, request);
                 response = mBlobStore.putBlob(request.getmContainerName(), blob);
                 
-                r = new CloudReply(request.getmSeqNumber(), mProperties.getProperty("jclouds.provider"), response, System.currentTimeMillis());
+                r = new CloudReply(request.getmSeqNumber(), mCloudId, response, System.currentTimeMillis());
                 r.setmOp(request.getmOp());
                 r.setmDataUnit(request.getReg());
                 r.setmIsMetadataFile(request.ismIsMetadataFile());
@@ -201,20 +218,30 @@ public class DepSkySCloudManager implements Callable<Void> {
             case GET_DATA:
                 init = System.currentTimeMillis();
                 // download a file from the cloud
+                mBlobStore.createContainerInLocation(null, request.getmContainerName());
+                
                 blob = mBlobStore.getBlob(request.getmContainerName(), request.getmDataFileName());
-
-                r = new CloudReply(request.getmSeqNumber(), mProperties.getProperty("jclouds.provider"), blob.getPayload().getRawContent(), System.currentTimeMillis());
+                String versionNumber = "true";
+                String versionHash = "true";
+                if(blob != null){
+                    r = new CloudReply(request.getmSeqNumber(), mCloudId, blob.getPayload().getRawContent(), System.currentTimeMillis());
+                    versionNumber = blob.getMetadata().getUserMetadata().get("versionNumber");
+                    versionHash = blob.getMetadata().getUserMetadata().get("versionNumber");
+                }
+                else{
+                    r = new CloudReply(request.getmSeqNumber(), mCloudId, null, System.currentTimeMillis());
+                }
                 r.setmOp(request.getmOp());
                 r.setmProtoOp(request.getmProtoOp());
                 r.setmContainerName(request.getmContainerName());
                 r.setmDataUnit(request.getReg());
                 r.setmIsMetadataFile(request.ismIsMetadataFile());
                 r.setmValue(request.getmW_data());
-                r.setmVersionNumber(request.getmVersionNumber());
-                r.setmVHash(request.getmVersionHash());
+                r.setmVersionNumber(versionNumber);
+                r.setmVHash(versionHash);
                 r.setmAllDataHash(request.getmAllDataHash());
                 r.setmHashMatching(request.getmHashMatching());
-                
+
                 r.setmInitReceiveTime(init);
                 r.setmStartTime(request.getmStartTime());
                 if (request.ismIsMetadataFile()) {
@@ -232,7 +259,7 @@ public class DepSkySCloudManager implements Callable<Void> {
                 // delete a file from the cloud
                 mBlobStore.removeBlob(request.getmContainerName(), request.getmDataFileName());
                 
-                r = new CloudReply(request.getmSeqNumber(), mProperties.getProperty("jclouds.provider"), true, System.currentTimeMillis());
+                r = new CloudReply(request.getmSeqNumber(), mCloudId, true, System.currentTimeMillis());
                 r.setmOp(request.getmOp());
                 r.setmProtoOp(request.getmProtoOp());
                 r.setmContainerName(request.getmContainerName());
@@ -253,7 +280,7 @@ public class DepSkySCloudManager implements Callable<Void> {
                     names.add(meta.getName());
                 }
                 
-                r = new CloudReply(request.getmSeqNumber(), mProperties.getProperty("jclouds.provider"), true, System.currentTimeMillis());
+                r = new CloudReply(request.getmSeqNumber(), mCloudId, true, System.currentTimeMillis());
 
                 r.setmOp(request.getmOp());
                 r.setmProtoOp(request.getmProtoOp());
@@ -270,7 +297,7 @@ public class DepSkySCloudManager implements Callable<Void> {
                 addReply(r);
                 break;
             case SET_ACL:
-                r = new CloudReply(request.getmSeqNumber(), mProperties.getProperty("jclouds.provider"), false, System.currentTimeMillis());
+                r = new CloudReply(request.getmSeqNumber(), mCloudId, false, System.currentTimeMillis());
                 r.setmOp(request.getmOp());
                 r.setmProtoOp(request.getmProtoOp());
                 r.setmContainerName(request.getmContainerName());
@@ -284,7 +311,7 @@ public class DepSkySCloudManager implements Callable<Void> {
             default:
                 // System.out.println("Operation does not exist");
 
-                r = new CloudReply(request.getmSeqNumber(), mProperties.getProperty("jclouds.provider"), null, System.currentTimeMillis());
+                r = new CloudReply(request.getmSeqNumber(), mCloudId, null, System.currentTimeMillis());
                 r.setmOp(request.getmOp());
                 r.setmProtoOp(request.getmProtoOp());
                 r.setmContainerName(request.getmContainerName());
@@ -305,7 +332,7 @@ public class DepSkySCloudManager implements Callable<Void> {
             }
             // after MAX_REPLIES return null response
 
-            r = new CloudReply(request.getmSeqNumber(), mProperties.getProperty("jclouds.provider"), null, System.currentTimeMillis());
+            r = new CloudReply(request.getmSeqNumber(), mCloudId, null, System.currentTimeMillis());
             r.setmOp(request.getmOp());
             r.setmProtoOp(request.getmProtoOp());
             r.setmContainerName(request.getmContainerName());
@@ -320,6 +347,11 @@ public class DepSkySCloudManager implements Callable<Void> {
             r.invalidateResponse();
             
         }
+    }
+
+    private void putBlobMeta(Blob blob, CloudRequest request) {
+        blob.getMetadata().getUserMetadata().put("versionNumber", request.getmVersionNumber());
+        blob.getMetadata().getUserMetadata().put("versionHash", request.getmVersionHash());
     }
 
     /*
@@ -358,15 +390,16 @@ public class DepSkySCloudManager implements Callable<Void> {
                     if (reply.getmDataUnit().getContainerId(reply.getmProviderId()) == null) {
                         reply.getmDataUnit().setContainerId(reply.getmProviderId(), ((String[])reply.getmResponse())[0]);
                     }
-                    CloudRequest r = new CloudRequest(GET_DATA, ids[0], mProperties.getProperty("jclouds.provider"), reply.getmStartTime());
+                    CloudRequest r = new CloudRequest(GET_DATA, ids[0], mCloudId, reply.getmStartTime());
                     r.setmDataFileName(ids[1]);
+                    r.setmContainerName(reply.getmContainerName());
                     r.setReg(reply.getmDataUnit());
                     r.setmSeqNumber(reply.getmSequenceNumber());
                     r.setmIsMetadataFile(true);
                     r.setmHashMatching(reply.getmHashMatching());
                     
                     doRequest(r);
-                } else if (reply.getmType() == NEW_DATA && !reply.ismIsMetadataFile() && reply.getmValue() != null) {
+                } else if (reply.getmType() == NEW_DATA && reply.ismIsMetadataFile() && reply.getmValue() != null) {
                     // System.out.println("WRITING METADATA for this reply" + reply);
                     mCloudDataManager.writeNewMetadata(reply);
                 } else if (reply.getmType() == NEW_DATA && reply.ismIsMetadataFile() && reply.getmValue() != null) {
@@ -400,6 +433,10 @@ public class DepSkySCloudManager implements Callable<Void> {
         mTerminate = false;
         mReplies.clear();
         mRequests.clear();
+    }
+
+    public String getCloudId() {
+        return mCloudId;
     }
 
 }

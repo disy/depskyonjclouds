@@ -1,0 +1,27 @@
+!!depskys.core.configuration.Configuration
+clouds:
+    - !!depskys.core.configuration.Account
+      type: filesystem
+      id: cloud1
+      accessKey: someRandomIdentity1
+      secretKey: dsg&%/(UJM$K)I
+    - !!depskys.core.configuration.Account
+      type: filesystem
+      id: cloud2
+      accessKey: someRandomIdentity2
+      secretKey: dsg&%/(UJM$K)I
+    - !!depskys.core.configuration.Account
+      type: filesystem
+      id: cloud3
+      accessKey: someRandomIdentity3
+      secretKey: dsg&%/(UJM$K)I
+    - !!depskys.core.configuration.Account
+      type: filesystem
+      id: cloud4
+      accessKey: someRandomIdentity4
+      secretKey: dsg&%/(UJM$K)I
+    - !!depskys.core.configuration.Account
+      type: filesystem
+      id: cloud5
+      accessKey: someRandomIdentity5
+      secretKey: dsg&%/(UJM$K)I
