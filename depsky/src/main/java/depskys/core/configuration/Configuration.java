@@ -6,6 +6,10 @@ public final class Configuration {
     
     private List<Account> clouds;
 
+    public Configuration(){
+        
+    }
+    
     public List<Account> getAccounts() {
         return clouds;
     }
