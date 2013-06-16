@@ -1,0 +1,26 @@
+clouds:
+    - account:
+        type: AMAZON-S3
+        id: cloud1
+        accessKey:
+        secretKey:
+    - account:
+        type: GOOGLE-STORAGE
+        id: cloud2
+        accessKey:
+        secretKey:
+    - account:
+        type: RACKSPACE
+        id: cloud3
+        accessKey:
+        secretKey:
+    - account:
+        type: WINDOWS-AZURE
+        id: cloud4
+        accessKey:
+        secretKey:
+    - account:
+        type: File
+        id: cloud5
+        accessKey:
+        secretKey:

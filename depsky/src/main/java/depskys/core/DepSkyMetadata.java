@@ -18,11 +18,10 @@ public class DepSkyMetadata {
 	private byte[] signature;	
 	private String metadata;
 
-	public DepSkyMetadata() {
+	public DepSkyMetadata(){
 	}
-
+	
 	public DepSkyMetadata(String medatada, byte[] signature, byte[] allDataHash, String versionFileId){
-		
 		this.metadata = medatada;
 		this.signature = signature;
 		this.allDataHash = allDataHash;

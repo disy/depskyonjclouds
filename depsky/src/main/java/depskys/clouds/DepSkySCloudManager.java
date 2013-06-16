@@ -69,6 +69,8 @@ public class DepSkySCloudManager implements Callable<Void> {
     private final BlobStoreContext mBlobStoreContext;
     /** Properties for this CloudManager */
     private final Properties mProperties;
+    /** Provider id */
+    private final String mProvider;
     /** Holder for the request in chronological order */
     private LinkedBlockingQueue<CloudRequest> mRequests;
     /** Holder for the replies in chronological order */
@@ -85,7 +87,7 @@ public class DepSkySCloudManager implements Callable<Void> {
         mProperties = pProperties;
 
         // Getting the properties
-        String provider = mProperties.getProperty("jclouds.provider");
+        String provider = mProvider = mProperties.getProperty("jclouds.provider");
         String identity = mProperties.getProperty("jclouds.identity");
         String credential = mProperties.getProperty("jclouds.credential");
         // Checking if the provider is valid.
@@ -384,6 +386,10 @@ public class DepSkySCloudManager implements Callable<Void> {
         } catch (Exception e) {
             e.printStackTrace();
         }
+    }
+
+    public String getmProvider() {
+        return mProvider;
     }
 
     public void terminate() {
