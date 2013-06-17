@@ -29,7 +29,11 @@ import com.google.common.collect.Maps;
 import com.google.common.io.ByteArrayDataOutput;
 import com.google.common.io.ByteStreams;
 
-import depskys.core.IDepSkySProtocol;
+import depskys.clouds.replys.DataCloudReply;
+import depskys.clouds.replys.ICloudReply;
+import depskys.clouds.requests.GeneralCloudRequest;
+import depskys.clouds.requests.ICloudRequest;
+import depskys.core.IDepSkyClient;
 import depskys.core.configuration.Account;
 
 /**
@@ -41,7 +45,7 @@ import depskys.core.configuration.Account;
  * 
  *         Modified by @author Andreas Rain, University of Konstanz
  */
-public class DepSkySCloudManager implements Callable<Void> {
+public class DepSkyCloudManager implements Callable<Void> {
 
     public static final int INIT_SESS = 0;
     public static final int NEW_CONT = 1;
@@ -49,10 +53,8 @@ public class DepSkySCloudManager implements Callable<Void> {
     public static final int NEW_DATA = 3;
     public static final int GET_DATA = 4;
     public static final int DEL_DATA = 5;
-    public static final int GET_DATA_ID = 6;
-    public static final int GET_CONT_AND_DATA_ID = 7;
-    public static final int SET_ACL = 8;
-    public static final int LIST = 9;
+    public static final int GET_META = 6;
+    public static final int LIST = 7;
 
     /** JClouds properties */
     public static final Map<String, ApiMetadata> allApis = Maps.uniqueIndex(Apis
@@ -75,18 +77,18 @@ public class DepSkySCloudManager implements Callable<Void> {
     /** Id of the cloud */
     private final String mCloudId;
     /** Holder for the request in chronological order */
-    private LinkedBlockingQueue<CloudRequest> mRequests;
+    private LinkedBlockingQueue<ICloudRequest> mRequests;
     /** Holder for the replies in chronological order */
-    private LinkedBlockingQueue<CloudReply> mReplies;
+    private LinkedBlockingQueue<ICloudReply> mReplies;
     /** CloudDataManager (Managing integrity, retrieval..) */
     private ICloudDataManager mCloudDataManager;
     /** IDepSkySProtocol that uses this cloud manager */
-    private IDepSkySProtocol mDepskys;
+    private IDepSkyClient mDepskys;
     /** Determine whether this manager should terminate or not */
     private boolean mTerminate = false;
 
-    public DepSkySCloudManager(Account account, ICloudDataManager pCloudDataManager,
-        IDepSkySProtocol pDepskys) {
+    public DepSkyCloudManager(Account account, ICloudDataManager pCloudDataManager,
+        IDepSkyClient pDepskys) {
 
         // Getting the properties
         mProvider = account.getType();
@@ -113,8 +115,8 @@ public class DepSkySCloudManager implements Callable<Void> {
         // Create Container
         mBlobStore = mBlobStoreContext.getBlobStore();
         
-        this.mRequests = new LinkedBlockingQueue<CloudRequest>();
-        this.mReplies = new LinkedBlockingQueue<CloudReply>();
+        this.mRequests = new LinkedBlockingQueue<ICloudRequest>();
+        this.mReplies = new LinkedBlockingQueue<ICloudReply>();
         this.mCloudDataManager = pCloudDataManager;
         this.mDepskys = pDepskys;
     }
@@ -138,7 +140,7 @@ public class DepSkySCloudManager implements Callable<Void> {
      * Do a request on this cloud provider.
      * @param request
      */
-    public synchronized void doRequest(CloudRequest request) {
+    public synchronized void doRequest(GeneralCloudRequest request) {
         if (!mTerminate) {
             mRequests.offer(request);
         }
@@ -149,7 +151,7 @@ public class DepSkySCloudManager implements Callable<Void> {
      * Add a reply by this cloud provider.
      * @param reply
      */
-    public synchronized void addReply(CloudReply reply) {
+    public synchronized void addReply(DataCloudReply reply) {
         if (!mTerminate) {
             mReplies.offer(reply);
         }
@@ -159,8 +161,8 @@ public class DepSkySCloudManager implements Callable<Void> {
      * Process received requests
      */
     private void processRequest() {
-        CloudRequest request = null;
-        CloudReply r = null;
+        GeneralCloudRequest request = null;
+        DataCloudReply r = null;
         long init = 0;
         try {
             
@@ -196,7 +198,7 @@ public class DepSkySCloudManager implements Callable<Void> {
                 putBlobMeta(blob, request);
                 response = mBlobStore.putBlob(request.getmContainerName(), blob);
                 
-                r = new CloudReply(request.getmSeqNumber(), mCloudId, response, System.currentTimeMillis());
+                r = new DataCloudReply(request.getmSeqNumber(), mCloudId, response, System.currentTimeMillis());
                 r.setmOp(request.getmOp());
                 r.setmDataUnit(request.getReg());
                 r.setmIsMetadataFile(request.ismIsMetadataFile());
@@ -224,12 +226,12 @@ public class DepSkySCloudManager implements Callable<Void> {
                 String versionNumber = "true";
                 String versionHash = "true";
                 if(blob != null){
-                    r = new CloudReply(request.getmSeqNumber(), mCloudId, blob.getPayload().getRawContent(), System.currentTimeMillis());
+                    r = new DataCloudReply(request.getmSeqNumber(), mCloudId, blob.getPayload().getRawContent(), System.currentTimeMillis());
                     versionNumber = blob.getMetadata().getUserMetadata().get("versionNumber");
                     versionHash = blob.getMetadata().getUserMetadata().get("versionNumber");
                 }
                 else{
-                    r = new CloudReply(request.getmSeqNumber(), mCloudId, null, System.currentTimeMillis());
+                    r = new DataCloudReply(request.getmSeqNumber(), mCloudId, null, System.currentTimeMillis());
                 }
                 r.setmOp(request.getmOp());
                 r.setmProtoOp(request.getmProtoOp());
@@ -259,7 +261,7 @@ public class DepSkySCloudManager implements Callable<Void> {
                 // delete a file from the cloud
                 mBlobStore.removeBlob(request.getmContainerName(), request.getmDataFileName());
                 
-                r = new CloudReply(request.getmSeqNumber(), mCloudId, true, System.currentTimeMillis());
+                r = new DataCloudReply(request.getmSeqNumber(), mCloudId, true, System.currentTimeMillis());
                 r.setmOp(request.getmOp());
                 r.setmProtoOp(request.getmProtoOp());
                 r.setmContainerName(request.getmContainerName());
@@ -280,7 +282,7 @@ public class DepSkySCloudManager implements Callable<Void> {
                     names.add(meta.getName());
                 }
                 
-                r = new CloudReply(request.getmSeqNumber(), mCloudId, true, System.currentTimeMillis());
+                r = new DataCloudReply(request.getmSeqNumber(), mCloudId, true, System.currentTimeMillis());
 
                 r.setmOp(request.getmOp());
                 r.setmProtoOp(request.getmProtoOp());
@@ -297,7 +299,7 @@ public class DepSkySCloudManager implements Callable<Void> {
                 addReply(r);
                 break;
             case SET_ACL:
-                r = new CloudReply(request.getmSeqNumber(), mCloudId, false, System.currentTimeMillis());
+                r = new DataCloudReply(request.getmSeqNumber(), mCloudId, false, System.currentTimeMillis());
                 r.setmOp(request.getmOp());
                 r.setmProtoOp(request.getmProtoOp());
                 r.setmContainerName(request.getmContainerName());
@@ -311,7 +313,7 @@ public class DepSkySCloudManager implements Callable<Void> {
             default:
                 // System.out.println("Operation does not exist");
 
-                r = new CloudReply(request.getmSeqNumber(), mCloudId, null, System.currentTimeMillis());
+                r = new DataCloudReply(request.getmSeqNumber(), mCloudId, null, System.currentTimeMillis());
                 r.setmOp(request.getmOp());
                 r.setmProtoOp(request.getmProtoOp());
                 r.setmContainerName(request.getmContainerName());
@@ -332,7 +334,7 @@ public class DepSkySCloudManager implements Callable<Void> {
             }
             // after MAX_REPLIES return null response
 
-            r = new CloudReply(request.getmSeqNumber(), mCloudId, null, System.currentTimeMillis());
+            r = new DataCloudReply(request.getmSeqNumber(), mCloudId, null, System.currentTimeMillis());
             r.setmOp(request.getmOp());
             r.setmProtoOp(request.getmProtoOp());
             r.setmContainerName(request.getmContainerName());
@@ -349,7 +351,7 @@ public class DepSkySCloudManager implements Callable<Void> {
         }
     }
 
-    private void putBlobMeta(Blob blob, CloudRequest request) {
+    private void putBlobMeta(Blob blob, GeneralCloudRequest request) {
         blob.getMetadata().getUserMetadata().put("versionNumber", request.getmVersionNumber());
         blob.getMetadata().getUserMetadata().put("versionHash", request.getmVersionHash());
     }
@@ -359,7 +361,7 @@ public class DepSkySCloudManager implements Callable<Void> {
      */
     private void processReply() {
         try {
-            CloudReply reply = mReplies.take();// processing removed reply next
+            DataCloudReply reply = mReplies.take();// processing removed reply next
             if (reply == null) {
                 // System.out.println("REPLY IS NULL!!");
                 return;
@@ -390,7 +392,7 @@ public class DepSkySCloudManager implements Callable<Void> {
                     if (reply.getmDataUnit().getContainerId(reply.getmProviderId()) == null) {
                         reply.getmDataUnit().setContainerId(reply.getmProviderId(), ((String[])reply.getmResponse())[0]);
                     }
-                    CloudRequest r = new CloudRequest(GET_DATA, ids[0], mCloudId, reply.getmStartTime());
+                    GeneralCloudRequest r = new GeneralCloudRequest(GET_DATA, ids[0], mCloudId, reply.getmStartTime());
                     r.setmDataFileName(ids[1]);
                     r.setmContainerName(reply.getmContainerName());
                     r.setReg(reply.getmDataUnit());

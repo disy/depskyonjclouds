@@ -3,6 +3,8 @@ package depskys.clouds;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Semaphore;
 
+import depskys.clouds.replys.ICloudReply;
+
 /**
  *
  * @author koras
@@ -13,32 +15,32 @@ public class CloudRepliesControlSet {
      * This semaphore has no permits, and its purpose is to lock a thread waiting for relies.
      * After, when n - f replies are received, the locked thread is unlocked.
      */
-    private Semaphore waitReplies = new Semaphore(0);
-    private CopyOnWriteArrayList<CloudReply> replies;
-    private int sequence;
+    private Semaphore mWaitReplies = new Semaphore(0);
+    private CopyOnWriteArrayList<ICloudReply> mReplies;
+    private long mSequence;
 
-    public CloudRepliesControlSet(int n, int sequence) {
-        this.sequence = sequence;
-        this.replies = new CopyOnWriteArrayList<CloudReply>();
+    public CloudRepliesControlSet(int n, long pSequence) {
+        this.mSequence = pSequence;
+        this.mReplies = new CopyOnWriteArrayList<ICloudReply>();
     }
 
     public Semaphore getWaitReplies() {
-        return waitReplies;
+        return mWaitReplies;
     }
 
     public void setWaitReplies(Semaphore waitReplies) {
-        this.waitReplies = waitReplies;
+        this.mWaitReplies = waitReplies;
     }
 
-    public CopyOnWriteArrayList<CloudReply> getReplies() {
-        return replies;
+    public CopyOnWriteArrayList<ICloudReply> getReplies() {
+        return mReplies;
     }
 
-    public void setReplies(CopyOnWriteArrayList<CloudReply> replies) {
-        this.replies = replies;
+    public void setReplies(CopyOnWriteArrayList<ICloudReply> replies) {
+        this.mReplies = replies;
     }
 
-    public int getSequence() {
-        return sequence;
+    public long getSequence() {
+        return mSequence;
     }
 }

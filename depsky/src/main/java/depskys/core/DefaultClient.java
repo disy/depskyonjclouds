@@ -13,6 +13,7 @@ import java.math.BigInteger;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.text.ParseException;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
@@ -35,11 +36,17 @@ import pvss.PublishedShares;
 import pvss.Share;
 import util.Pair;
 import depskys.clouds.CloudRepliesControlSet;
-import depskys.clouds.CloudReply;
-import depskys.clouds.CloudRequest;
-import depskys.clouds.DepSkySCloudManager;
+import depskys.clouds.DepSkyCloudManager;
+import depskys.clouds.replys.DataCloudReply;
+import depskys.clouds.replys.ICloudReply;
+import depskys.clouds.replys.MetaCloudReply;
+import depskys.clouds.requests.GeneralCloudRequest;
 import depskys.core.configuration.Account;
 import depskys.core.configuration.Configuration;
+import depskys.core.exceptions.CouldNotGetDataException;
+import depskys.core.exceptions.DepSkyException;
+import depskys.core.exceptions.NoDataAvailableException;
+import depskys.core.exceptions.TooManyCloudsBrokeException;
 
 /**
  * Class for using DepSky
@@ -48,28 +55,25 @@ import depskys.core.configuration.Configuration;
  * @author bruno quaresma
  *         Modified by @author Andreas Rain, University of Konstanz
  */
-public class DepSkySClient implements IDepSkySProtocol {
+public class DefaultClient implements IDepSkyClient {
 
     public int N, F, T = 2/* jss_shares=f+1 */, NUM_BITS = 192;
 
-    /**
-     * @param args
-     */
-    private int clientId;
-    private int sequence = -1;
-    private DepSkySCloudManager[] mCloudManagers;
-    private DepSkySManager manager;
-    private HashMap<Integer, CloudRepliesControlSet> replies;
-    private boolean parallelRequests = false; // Optimized Read or Normal Read
+    private int mClientId;
+    private long mSequence = -1;
+    private DepSkyCloudManager[] mCloudManagers;
+    private DepSkyManager mDepSkyManager;
+    private HashMap<Long, CloudRepliesControlSet> mReplies;
+    private boolean mParallelRequests = false; // Optimized Read or Normal Read
 
-    private List<CloudReply> lastReadReplies; // pointer for planet lab stats
-    private List<CloudReply> lastMetadataReplies; // pointer for planet lab stats
-    private int lastReadMetadataSequence = -1, lastReadRepliesMaxVerIdx = -1;
-    private boolean sentOne = false;
-    private byte[] testData = null;
-    private byte[] response = null;
-    private ReedSolDecoder decoder;
-    private ReedSolEncoder encoder;
+    private List<ICloudReply> mLastReadReplies; // pointer for planet lab stats
+    private List<ICloudReply> mLastMetadataReplies; // pointer for planet lab stats
+    private long mLastReadMetadataSequence = -1;
+    private int mLastReadRepliesMaxVerIdx = -1;
+    private boolean mSentOne = false;
+    private byte[] mResponse = null;
+    private ReedSolDecoder mDecoder;
+    private ReedSolEncoder mEncoder;
 
     private final String mConfigPath;
 
@@ -85,8 +89,8 @@ public class DepSkySClient implements IDepSkySProtocol {
      *            if true, cloudofclouds are used instead
      * 
      */
-    public DepSkySClient(int clientId, String pConfigPath) {
-        this.clientId = clientId;
+    public DefaultClient(int clientId, String pConfigPath) {
+        this.mClientId = clientId;
         this.mConfigPath = pConfigPath;
         List<Account> credentials = null;
         try {
@@ -99,31 +103,217 @@ public class DepSkySClient implements IDepSkySProtocol {
             e.printStackTrace();
         }
 
-        this.mCloudManagers = new DepSkySCloudManager[credentials.size()];
+        this.mCloudManagers = new DepSkyCloudManager[credentials.size()];
 
-        this.manager = new DepSkySManager(null, this);
+        this.mDepSkyManager = new DepSkyManager(null, this);
 
         int c = 0;
         for (Account acc : credentials) {
-            DepSkySCloudManager cloudManager = new DepSkySCloudManager(acc, manager, this);
+            DepSkyCloudManager cloudManager = new DepSkyCloudManager(acc, mDepSkyManager, this);
             mCloudManagers[c] = cloudManager;
             c++;
         }
 
-        manager.setCloudManagers(mCloudManagers);
-        manager.initClouds();
+        mDepSkyManager.setCloudManagers(mCloudManagers);
+        mDepSkyManager.initClouds();
 
-        this.replies = new HashMap<Integer, CloudRepliesControlSet>();
+        this.mReplies = new HashMap<Long, CloudRepliesControlSet>();
         this.N = credentials.size();
         this.F = 1;
-        this.encoder = new ReedSolEncoder(2, 3, 8);
-        this.decoder = new ReedSolDecoder(2, 3, 8);
-        
+        this.mEncoder = new ReedSolEncoder(N / 2, (int)Math.ceil(Double.valueOf(N) / 2), 8);
+        this.mDecoder = new ReedSolDecoder(N / 2, (int)Math.ceil(Double.valueOf(N) / 2), 8);
+
         startCloudManagers();
     }
 
+    /**
+     * Read the last version written for the file associated with reg
+     * 
+     * @param pUnit
+     *            - the DataUnit associated with the file
+     * @throws InterruptedException 
+     * 
+     */
+    public synchronized byte[] read(DepSkyDataUnit pUnit) throws DepSkyException, InterruptedException {
+
+        mParallelRequests = true;
+        CloudRepliesControlSet rcs = null;
+
+        try {
+            long seq = getNextSequence();
+            rcs = new CloudRepliesControlSet(N, seq);
+            // broadcast to all clouds to get the metadata file and after the version requested
+            mReplies.put(seq, rcs);
+            broadcastGetMetadata(seq, pUnit, DepSkyManager.READ_PROTO, null);
+            int nullResponses = 0;
+            // process value data responses
+            mLastReadMetadataSequence = seq;
+            rcs.getWaitReplies().acquire(); // blocks until this semaphore is released
+            mLastReadReplies = rcs.getReplies();
+            List<MetaCloudReply> maxVersionReplys = new ArrayList<>();
+            Long maxVersion = null;
+
+            // process metadata replies, choose from which cloud to read the data.
+            for (ICloudReply reply : rcs.getReplies()) {
+                MetaCloudReply r;
+                if (reply != null && reply instanceof MetaCloudReply) {
+                    r = (MetaCloudReply)reply;
+                } else if (reply == null) {
+                    nullResponses++;
+                    continue;
+                } else {
+                    throw new IllegalStateException("Retrieved a data reply instead of a metadata");
+                }
+                
+                if(maxVersion == null){
+                    maxVersion = r.getDataUnit().getMaxVersion();
+                }
+
+                if (nullResponses >= N - F) {
+                    throw new NoDataAvailableException();
+                } else if (nullResponses > F) {
+                    throw new TooManyCloudsBrokeException();
+                }
+
+                Long rVersion = Long.valueOf(r.getVersionNumber());
+
+                // See if this version is maximal
+                if (maxVersion.equals(rVersion)) {
+                    // if so, add it to the replies
+                    maxVersionReplys.add(r);
+                }
+            }
+
+            if (maxVersionReplys.size() == 0) {
+                throw new NoDataAvailableException();
+            }
+
+            // Setting the cloud reply set only to the size of the max version replies
+            rcs = new CloudRepliesControlSet(maxVersionReplys.size(), seq);
+            mReplies.put(seq, rcs);
+            
+            for(MetaCloudReply maxVersionReply : maxVersionReplys){
+                DepSkyDataUnit readUnit =
+                    new DepSkyDataUnit(maxVersionReply.getDataUnit().getContainerName(), maxVersionReply
+                        .getDataUnit().getGivenVersionValueDataFileName(maxVersionReply.getVersionNumber()));
+                readUnit.setCloudRequirement(maxVersionReplys.size(), 1);
+
+                GeneralCloudRequest request =
+                    new GeneralCloudRequest(DepSkyCloudManager.GET_DATA, readUnit, maxVersionReply
+                        .getSequenceNumber(), maxVersionReply.getStartTime());
+                request.setProtoOp(maxVersionReply.getProtoOp());
+                request.setVersionHash(maxVersionReply.getVersionHash());
+                request.setVersionNumber(maxVersionReply.getVersionNumber());
+                
+                mDepSkyManager.doRequest(maxVersionReply.getProviderId(), request);
+            }
+            
+            rcs.getWaitReplies().acquire(); // blocks until this semaphore is released
+            mLastReadReplies = rcs.getReplies();
+            
+            if(!mLastReadReplies.isEmpty()){
+                for(ICloudReply dataReply : mLastReadReplies){
+                    if(dataReply instanceof DataCloudReply && ((DataCloudReply) dataReply).getResponse() != null){
+                        return ((DataCloudReply) dataReply).getResponse();
+                    }
+                }
+            }
+            
+            throw new CouldNotGetDataException();
+
+        } finally {
+            mParallelRequests = false;
+            if (rcs != null) {
+                mReplies.remove(rcs.getSequence());
+            }
+        }
+    }
+
+    /**
+     * Writes the value value in the corresponding dataUnit reg
+     * 
+     * @param reg
+     *            - the DataUnit associated with the file
+     * @param value
+     *            - value to be written
+     * @return the hash of the value written
+     * 
+     */
+    public synchronized byte[] write(DepSkyDataUnit reg, byte[] value) throws Exception {
+
+        CloudRepliesControlSet rcs = null, wrcs = null;
+
+        try {
+            int seq = getNextSequence();
+            rcs = new CloudRepliesControlSet(N, seq);
+            mReplies.put(seq, rcs);
+            // broadcast to all clouds to get the Metadata associated with this dataUnit
+            broadcastGetMetadata(seq, reg, DepSkyManager.WRITE_PROTO, null);
+            rcs.getWaitReplies().acquire(); // blocks until the semaphore is released
+            mLastMetadataReplies = rcs.getReplies();
+            // process replies and actualize version
+            int nullCounter = 0;
+            long maxVersionFound = -1;
+
+            // proccess metadata replies
+            for (int i = 0; i < rcs.getReplies().size(); i++) {
+                DataCloudReply r = rcs.getReplies().get(i);
+                if (r.getmResponse() == null || r.getmType() != DepSkyCloudManager.GET_DATA
+                    || r.getmVersionNumber() == null) {
+                    nullCounter++;
+                    continue;
+                } else {
+                    long version = Long.parseLong(r.getmVersionNumber());
+                    if (version > maxVersionFound) {
+                        maxVersionFound = version;
+                    }
+                }
+            }
+
+            // when is the first write for this dataUnit (none version was found)
+            if (nullCounter > F) {
+                maxVersionFound = 0;
+            }
+
+            // calcule the name of the version to be written
+            long nextVersion = maxVersionFound + DepSkyManager.MAX_CLIENTS + mClientId;
+
+            seq = getNextSequence();
+            wrcs = new CloudRepliesControlSet(N, seq);
+            mReplies.put(seq, wrcs);
+            byte[] allDataHash = generateSHA1Hash(value);
+
+            // do the broadcast depending on the protocol selected for use (CA, A, only erasure codes or only
+            // secret sharing)
+            if (reg.isErsCodes()) {
+                broadcastWriteValueErasureCodes(mSequence, reg, value, nextVersion + "", allDataHash);
+            } else if (reg.isSecSharing()) {
+                broadcastWriteValueSecretKeyShares(mSequence, reg, value, nextVersion + "", allDataHash);
+            } else if (reg.isPVSS()) {
+                broadcastWriteValueErasureCodesAndSecretKeyShares(mSequence, reg, value, nextVersion + "",
+                    allDataHash);
+            } else {
+                broadcastWriteValueRequests(seq, reg, value, nextVersion + "", allDataHash);
+            }
+
+            wrcs.getWaitReplies().acquire();
+            mLastReadReplies = wrcs.getReplies();
+
+            reg.mLastVersionNumber = nextVersion;
+            return allDataHash;
+        } catch (Exception ex) {
+            System.out.println("DEPSKYS WRITE ERROR:");
+            // ex.printStackTrace();
+            throw ex;
+        }
+
+    }
+
+    /**
+     * {@inheritDoc}
+     */
     public int getClientId() {
-        return this.clientId;
+        return this.mClientId;
     }
 
     /**
@@ -137,10 +327,10 @@ public class DepSkySClient implements IDepSkySProtocol {
      * @throws Exception
      * 
      */
-    public synchronized byte[] readMatching(DepSkySDataUnit reg, byte[] hashMatching) throws Exception {
+    public synchronized byte[] readMatching(DepSkyDataUnit reg, byte[] hashMatching) throws Exception {
 
-        parallelRequests = true;
-        lastMetadataReplies = null;
+        mParallelRequests = true;
+        mLastMetadataReplies = null;
         CloudRepliesControlSet rcs = null;
 
         try {
@@ -148,20 +338,20 @@ public class DepSkySClient implements IDepSkySProtocol {
             int seq = getNextSequence();
             rcs = new CloudRepliesControlSet(N, seq);
             // broadcast to all clouds to get the metadata file and after the version requested
-            broadcastGetMetadata(seq, reg, DepSkySManager.READ_PROTO, hashMatching);
-            replies.put(seq, rcs);
+            broadcastGetMetadata(seq, reg, DepSkyManager.READ_PROTO, hashMatching);
+            mReplies.put(seq, rcs);
             int nullResponses = 0;
 
-            lastReadMetadataSequence = seq;
+            mLastReadMetadataSequence = seq;
             rcs.getWaitReplies().acquire(); // blocks until this semaphore is released
-            lastReadReplies = rcs.getReplies();
+            mLastReadReplies = rcs.getReplies();
             int[] versionReceived = new int[N];
             int maxVerCounter = 0, oldVerCounter = 0;
 
             // process replies to analyze if we get correct responses
             for (int i = 0; i < rcs.getReplies().size(); i++) {
-                CloudReply r = rcs.getReplies().get(i);
-                if (r.getmResponse() == null || r.getmType() != DepSkySCloudManager.GET_DATA
+                DataCloudReply r = rcs.getReplies().get(i);
+                if (r.getmResponse() == null || r.getmType() != DepSkyCloudManager.GET_DATA
                     || r.getmVersionNumber() == null || r.getmDataUnit() == null) {
                     nullResponses++;
                     // Fault check #1
@@ -194,7 +384,7 @@ public class DepSkySClient implements IDepSkySProtocol {
                         // Data Unit NOT using PVSS (returns first reply with maxVersionFound in metadata)
                         if (maxVersionFound.longValue() == Long.parseLong(r.getmVersionNumber())) {
                             // reg.clearAllCaches();
-                            lastReadRepliesMaxVerIdx = i;
+                            mLastReadRepliesMaxVerIdx = i;
                             return (byte[])r.getmResponse();
                         }
                     }
@@ -208,14 +398,14 @@ public class DepSkySClient implements IDepSkySProtocol {
 
                 for (int i = 0; i < rcs.getReplies().size(); i++) {
                     if (maxVerCounter >= T && versionReceived[i] != 1) {
-                        CloudReply resp = rcs.getReplies().get(i);
+                        DataCloudReply resp = rcs.getReplies().get(i);
                         resp.invalidateResponse();
                     } else if (oldVerCounter >= T && versionReceived[i] != 2) {
-                        CloudReply resp = rcs.getReplies().get(i);
+                        DataCloudReply resp = rcs.getReplies().get(i);
                         resp.invalidateResponse();
                     }
                 }
-                for (CloudReply r : rcs.getReplies()) {
+                for (DataCloudReply r : rcs.getReplies()) {
                     int i = 0;
                     if (r.getmResponse() != null) {
                         byte[] ecksobjbytes = (byte[])r.getmResponse();
@@ -229,7 +419,7 @@ public class DepSkySClient implements IDepSkySProtocol {
                         if (sk_share != null) {
                             keyshares[sk_share.getIndex()] = sk_share;
                             if (i < 1)
-                                this.response = ecksobj.getECbytes();
+                                this.mResponse = ecksobj.getECbytes();
                             i++;
                         }
                     }
@@ -252,138 +442,12 @@ public class DepSkySClient implements IDepSkySProtocol {
             // ex.printStackTrace();
             throw ex;
         } finally {
-            parallelRequests = false;
+            mParallelRequests = false;
             if (rcs != null) {
-                replies.remove(rcs.getSequence());
+                mReplies.remove(rcs.getSequence());
             }
         }
 
-    }
-
-    /**
-     * Read the last version written for the file associated with reg
-     * 
-     * @param reg
-     *            - the DataUnit associated with the file
-     * 
-     */
-    public synchronized byte[] read(DepSkySDataUnit reg) throws Exception {
-
-        parallelRequests = true;
-        lastMetadataReplies = null;
-        CloudRepliesControlSet rcs = null;
-
-        try {
-            int seq = getNextSequence();
-            rcs = new CloudRepliesControlSet(N, seq);
-            // broadcast to all clouds to get the metadata file and after the version requested
-            broadcastGetMetadata(seq, reg, DepSkySManager.READ_PROTO, null);
-            replies.put(seq, rcs);
-            int nullResponses = 0;
-            // process value data responses
-            lastReadMetadataSequence = seq;
-            rcs.getWaitReplies().acquire(); // blocks until this semaphore is released
-            lastReadReplies = rcs.getReplies();
-            int[] versionReceived = new int[N];
-            int maxVerCounter = 0, oldVerCounter = 0;
-
-            // process replies to analyze if we get correct responses
-            for (int i = 0; i < rcs.getReplies().size(); i++) {
-                CloudReply r = rcs.getReplies().get(i);
-                if (r.getmResponse() == null || r.getmType() != DepSkySCloudManager.GET_DATA
-                    || r.getmVersionNumber() == null || r.getmDataUnit() == null) {
-                    nullResponses++;
-                    // Fault check #1
-                } else {
-                    Long maxVersionFound = r.getmDataUnit().getMaxVersion();
-                    // process replies
-                    if (reg.isPVSS()) {
-                        // Data Unit using PVSS (retuns when having f + 1 sequential replies with
-                        // maxVersionFound)
-                        if (r.getmDataUnit().getMaxVersion() == null
-                            || maxVersionFound.longValue() == Long.parseLong(r.getmVersionNumber())) {
-                            // have max version
-                            versionReceived[i] = 1;
-                            maxVerCounter++;
-                        } else {
-                            // have old version
-                            versionReceived[i] = 2;
-                            oldVerCounter++;
-                        }
-                    } else {
-                        // Data Unit NOT using PVSS (returns first reply with maxVersionFound in metadata)
-                        if (maxVersionFound.longValue() == Long.parseLong(r.getmVersionNumber())) {
-                            lastReadRepliesMaxVerIdx = i;
-                            return (byte[])r.getmResponse(); // using DepSky-A
-                        }
-                    }
-                }
-            }// for replies
-
-            if (nullResponses >= N - F) {
-                throw new Exception(
-                    "READ ERROR: DepSky-S DataUnit does not exist or client is offline (internet connection failed)");
-            } else if (nullResponses > F) {
-                // System.out.println(r.response + "  \n" + r.type + "  \n" + r.vNumber + "  \n" +
-                // r.reg.toString());
-                throw new Exception("READ ERROR: at least f + 1 clouds failed.");
-            }
-
-            Share[] keyshares = new Share[N];
-            Map<String, byte[]> erasurec = new HashMap<>();
-            if (reg.isErsCodes() || reg.isSecSharing() || reg.isPVSS()) {
-
-                for (int i = 0; i < rcs.getReplies().size(); i++) {
-                    if (maxVerCounter >= T && versionReceived[i] != 1) {
-                        CloudReply resp = rcs.getReplies().get(i);
-                        resp.invalidateResponse();
-                    } else if (oldVerCounter >= T && versionReceived[i] != 2) {
-                        CloudReply resp = rcs.getReplies().get(i);
-                        resp.invalidateResponse();
-                    }
-                }
-
-                for (CloudReply r : rcs.getReplies()) {
-                    int i = 0;
-                    if (r.getmResponse() != null) {
-                        byte[] ecksobjbytes = (byte[])r.getmResponse();
-                        ByteArrayInputStream bais = new ByteArrayInputStream(ecksobjbytes);
-                        ObjectInputStream ois = new ObjectInputStream(bais);
-                        ECKSObject ecksobj;
-                        ecksobj = (ECKSObject)ois.readObject();
-                        if (ecksobj.getECfilename() != null)
-                            erasurec.put(ecksobj.getECfilename(), ecksobj.getECbytes());
-                        Share sk_share = ecksobj.getSKshare();
-                        if (sk_share != null) {
-                            keyshares[sk_share.getIndex()] = sk_share;
-                            if (i < 1)
-                                this.response = ecksobj.getECbytes();
-                            i++;
-                        }
-                    }
-                }
-
-            }
-            if (reg.isErsCodes()) { // unsing only erasure codes
-                return readErasureCodes(reg, erasurec);
-            } else if (reg.isSecSharing()) { // using only secret sharing
-                return readSecretSharing(reg, keyshares);
-            } else if (reg.isPVSS()) { // using DepSky-CA
-                return readSecretSharingErasureCodes(reg, keyshares, erasurec);
-            }
-
-            // not pvss or something went wrong with metadata
-            throw new Exception("READ ERROR: Could not get data after processing metadata");
-
-        } catch (Exception ex) {
-            // ex.printStackTrace();
-            throw ex;
-        } finally {
-            parallelRequests = false;
-            if (rcs != null) {
-                replies.remove(rcs.getSequence());
-            }
-        }
     }
 
     /**
@@ -392,16 +456,16 @@ public class DepSkySClient implements IDepSkySProtocol {
      * @param reg
      *            - Data Unit
      */
-    public void deleteContainer(DepSkySDataUnit reg) throws Exception {
+    public void deleteContainer(DepSkyDataUnit reg) throws Exception {
 
         CloudRepliesControlSet rcs = null;
         try {
             int seq = getNextSequence();
             rcs = new CloudRepliesControlSet(N, seq);
-            replies.put(seq, rcs);
-            broadcastGetMetadata(seq, reg, DepSkySManager.DELETE_ALL, null);
+            mReplies.put(seq, rcs);
+            broadcastGetMetadata(seq, reg, DepSkyManager.DELETE_ALL, null);
             rcs.getWaitReplies().acquire();
-            lastMetadataReplies = rcs.getReplies();
+            mLastMetadataReplies = rcs.getReplies();
 
         } catch (InterruptedException e) {
             e.printStackTrace();
@@ -409,107 +473,26 @@ public class DepSkySClient implements IDepSkySProtocol {
     }
 
     /**
-     * Writes the value value in the corresponding dataUnit reg
-     * 
-     * @param reg
-     *            - the DataUnit associated with the file
-     * @param value
-     *            - value to be written
-     * @return the hash of the value written
-     * 
-     */
-    public synchronized byte[] write(DepSkySDataUnit reg, byte[] value) throws Exception {
-
-        CloudRepliesControlSet rcs = null, wrcs = null;
-
-        try {
-            int seq = getNextSequence();
-            rcs = new CloudRepliesControlSet(N, seq);
-            replies.put(seq, rcs);
-            // broadcast to all clouds to get the Metadata associated with this dataUnit
-            broadcastGetMetadata(seq, reg, DepSkySManager.WRITE_PROTO, null);
-            rcs.getWaitReplies().acquire(); // blocks until the semaphore is released
-            lastMetadataReplies = rcs.getReplies();
-            // process replies and actualize version
-            int nullCounter = 0;
-            long maxVersionFound = -1;
-
-            // proccess metadata replies
-            for (int i = 0; i < rcs.getReplies().size(); i++) {
-                CloudReply r = rcs.getReplies().get(i);
-                if (r.getmResponse() == null || r.getmType() != DepSkySCloudManager.GET_DATA
-                    || r.getmVersionNumber() == null) {
-                    nullCounter++;
-                    continue;
-                } else {
-                    long version = Long.parseLong(r.getmVersionNumber());
-                    if (version > maxVersionFound) {
-                        maxVersionFound = version;
-                    }
-                }
-            }
-
-            // when is the first write for this dataUnit (none version was found)
-            if (nullCounter > F) {
-                maxVersionFound = 0;
-            }
-
-            // calcule the name of the version to be written
-            long nextVersion = maxVersionFound + DepSkySManager.MAX_CLIENTS + clientId;
-
-            seq = getNextSequence();
-            wrcs = new CloudRepliesControlSet(N, seq);
-            replies.put(seq, wrcs);
-            byte[] allDataHash = generateSHA1Hash(value);
-
-            // do the broadcast depending on the protocol selected for use (CA, A, only erasure codes or only
-            // secret sharing)
-            if (reg.isErsCodes()) {
-                broadcastWriteValueErasureCodes(sequence, reg, value, nextVersion + "", allDataHash);
-            } else if (reg.isSecSharing()) {
-                broadcastWriteValueSecretKeyShares(sequence, reg, value, nextVersion + "", allDataHash);
-            } else if (reg.isPVSS()) {
-                broadcastWriteValueErasureCodesAndSecretKeyShares(sequence, reg, value, nextVersion + "",
-                    allDataHash);
-            } else {
-                broadcastWriteValueRequests(seq, reg, value, nextVersion + "", allDataHash);
-            }
-
-            wrcs.getWaitReplies().acquire();
-            lastReadReplies = wrcs.getReplies();
-
-            reg.lastVersionNumber = nextVersion;
-            return allDataHash;
-        } catch (Exception ex) {
-            System.out.println("DEPSKYS WRITE ERROR:");
-            // ex.printStackTrace();
-            throw ex;
-        }
-
-    }
-
-    /**
      * NOT SUPORTED YET (waiting that all clouds support ACLs by container)
      */
-    public void
-        setAcl(DepSkySDataUnit reg, String permission, LinkedList<Pair<String, String>> cannonicalIds)
-            throws Exception {
+    public void setAcl(DepSkyDataUnit reg, String permission, LinkedList<Pair<String, String>> cannonicalIds)
+        throws Exception {
 
         CloudRepliesControlSet rcs = null, wrcs = null;
 
         try {
             int seq = getNextSequence();
             rcs = new CloudRepliesControlSet(N, seq);
-            replies.put(seq, rcs);
-            broadcastGetMetadata(seq, reg, DepSkySManager.ACL_PROTO, null);
+            mReplies.put(seq, rcs);
+            broadcastGetMetadata(seq, reg, DepSkyManager.ACL_PROTO, null);
             rcs.getWaitReplies().acquire();
-            lastMetadataReplies = rcs.getReplies();
+            mLastMetadataReplies = rcs.getReplies();
             // process replies and actualize version
             int nullCounter = 0;
             long maxVersionFound = -1;
             for (int i = 0; i < rcs.getReplies().size(); i++) {
-                CloudReply r = rcs.getReplies().get(i);
-                if (r.getmResponse() == null || r.getmType() != DepSkySCloudManager.GET_DATA
+                DataCloudReply r = rcs.getReplies().get(i);
+                if (r.getmResponse() == null || r.getmType() != DepSkyCloudManager.GET_DATA
                     || r.getmVersionNumber() == null) {
                     nullCounter++;
                     continue;
@@ -526,12 +509,12 @@ public class DepSkySClient implements IDepSkySProtocol {
 
             seq = getNextSequence();
             wrcs = new CloudRepliesControlSet(N, seq);
-            replies.put(seq, wrcs);
-            broadcastSetContainersACL(seq, reg, DepSkySManager.ACL_PROTO, maxVersionFound, permission,
+            mReplies.put(seq, wrcs);
+            broadcastSetContainersACL(seq, reg, DepSkyManager.ACL_PROTO, maxVersionFound, permission,
                 cannonicalIds);
 
             wrcs.getWaitReplies().acquire();
-            lastReadReplies = wrcs.getReplies();
+            mLastReadReplies = wrcs.getReplies();
 
         } catch (Exception ex) {
             // System.out.println("DEPSKYS WRITE ERROR: " + ex.getMessage());
@@ -548,15 +531,15 @@ public class DepSkySClient implements IDepSkySProtocol {
      *            - reply received by each broadcast containing the response of the clouds
      * 
      */
-    public void dataReceived(CloudReply reply) {
+    public void dataReceived(DataCloudReply reply) {
 
-        if (!replies.containsKey(reply.getmSequenceNumber())) {
+        if (!mReplies.containsKey(reply.getmSequenceNumber())) {
             // System.out.println("NOTE: sequence " + reply.sequence
             // + " replies already removed - " + reply);
             return;
         }
 
-        CloudRepliesControlSet rcs = replies.get(reply.getmSequenceNumber());
+        CloudRepliesControlSet rcs = mReplies.get(reply.getmSequenceNumber());
 
         if (rcs != null) {
             rcs.getReplies().add(reply);
@@ -570,11 +553,11 @@ public class DepSkySClient implements IDepSkySProtocol {
         }
 
         // processing reply
-        if (reply.getmProtoOp() == DepSkySManager.ACL_PROTO) {
+        if (reply.getmProtoOp() == DepSkyManager.ACL_PROTO) {
             if (rcs.getReplies().size() == 4) {
                 rcs.getWaitReplies().release();
             }
-        } else if (reply.getmProtoOp() == DepSkySManager.READ_PROTO
+        } else if (reply.getmProtoOp() == DepSkyManager.READ_PROTO
             && reply.getmVersionNumber().equals("true") && rcs.getReplies().size() >= N - F) { // read quorum
                                                                                                // when is a
                                                                                                // single file
@@ -584,7 +567,7 @@ public class DepSkySClient implements IDepSkySProtocol {
             // writeQuorum)
             rcs.getWaitReplies().release();
 
-        } else if (reply.getmProtoOp() == DepSkySManager.READ_PROTO && reply.getmDataUnit() != null
+        } else if (reply.getmProtoOp() == DepSkyManager.READ_PROTO && reply.getmDataUnit() != null
             && reply.getmDataUnit().cloudVersions != null
             && reply.getmDataUnit().cloudVersions.size() >= (N - F) && rcs.getReplies() != null
             && rcs.getReplies().size() > 0 && !reply.getmDataUnit().isPVSS() && !reply.ismIsMetadataFile()) {
@@ -598,7 +581,7 @@ public class DepSkySClient implements IDepSkySProtocol {
                 // System.out.println(reply.cloudId + " does not have max version "
                 // + maxVersion + " but has " + foundVersion);
             }
-        } else if (reply.getmProtoOp() == DepSkySManager.READ_PROTO && reply.getmDataUnit() != null
+        } else if (reply.getmProtoOp() == DepSkyManager.READ_PROTO && reply.getmDataUnit() != null
             && reply.getmDataUnit().cloudVersions != null
             && reply.getmDataUnit().cloudVersions.size() >= (N - F) && reply.getmDataUnit().isPVSS()
             && rcs.getReplies() != null && rcs.getReplies().size() > F) {
@@ -606,7 +589,7 @@ public class DepSkySClient implements IDepSkySProtocol {
             Long maxVersion = reply.getmDataUnit().getMaxVersion();
             int maxcounter = 0, othercounter = 0;
             for (int i = 0; i < rcs.getReplies().size(); i++) {
-                CloudReply r = rcs.getReplies().get(i);
+                DataCloudReply r = rcs.getReplies().get(i);
                 if (r.getmResponse() != null && maxVersion != null
                     && Long.parseLong(r.getmVersionNumber()) == maxVersion.longValue()) {
                     maxcounter++;
@@ -619,7 +602,7 @@ public class DepSkySClient implements IDepSkySProtocol {
                 rcs.getWaitReplies().release();
                 return;
             }
-        } else if (reply.getmProtoOp() == DepSkySManager.READ_PROTO && rcs.getReplies().size() >= N - F) {
+        } else if (reply.getmProtoOp() == DepSkyManager.READ_PROTO && rcs.getReplies().size() >= N - F) {
             int nonNull = 0, nulls = 0;
             for (int i = 0; i < rcs.getReplies().size(); i++) {
                 if (rcs.getReplies().get(i).getmResponse() != null) {
@@ -633,7 +616,7 @@ public class DepSkySClient implements IDepSkySProtocol {
                 rcs.getWaitReplies().release();
                 return;
             }
-        } else if (reply.getmProtoOp() >= DepSkySManager.WRITE_PROTO && rcs.getReplies().size() >= N - F
+        } else if (reply.getmProtoOp() >= DepSkyManager.WRITE_PROTO && rcs.getReplies().size() >= N - F
             && reply.getmDataUnit() != null) {
             // write trigger (writes in all clouds)
             rcs.getWaitReplies().release();
@@ -641,15 +624,15 @@ public class DepSkySClient implements IDepSkySProtocol {
         }
 
         // wait 4 replies when is about the start of the connections with the clouds and the delete operation
-        if (rcs.getReplies().size() > N - F && reply.getmProtoOp() != DepSkySManager.WRITE_PROTO) {
+        if (rcs.getReplies().size() > N - F && reply.getmProtoOp() != DepSkyManager.WRITE_PROTO) {
             rcs.getWaitReplies().release();
-            replies.remove(rcs.getSequence());
+            mReplies.remove(rcs.getSequence());
         }
 
     }
 
     public boolean sendingParallelRequests() {
-        return parallelRequests;
+        return mParallelRequests;
     }
 
     /**
@@ -661,7 +644,7 @@ public class DepSkySClient implements IDepSkySProtocol {
         System.out.println("starting drivers...");
 
         mCloudService = Executors.newFixedThreadPool(4);
-        for (DepSkySCloudManager manager : mCloudManagers) {
+        for (DepSkyCloudManager manager : mCloudManagers) {
             mCloudService.submit(manager);
         }
 
@@ -672,37 +655,37 @@ public class DepSkySClient implements IDepSkySProtocol {
      * Compute the original data block when using secret sharing and erasure codes to replicate
      * the data
      */
-    private synchronized byte[] readSecretSharingErasureCodes(DepSkySDataUnit reg, Share[] keyshares,
+    private synchronized byte[] readSecretSharingErasureCodes(DepSkyDataUnit reg, Share[] keyshares,
         Map<String, byte[]> erasurec) throws Exception {
 
         int originalSize = Integer.parseInt(reg.getErCodesReedSolMeta().split(";")[0]);
         byte[] enc_sk = recombineSecretKeyShares(reg, keyshares);
         byte[] ecmeta = reg.getErCodesReedSolMeta().replace(";", "\r\n").getBytes();
         erasurec.put("metadata", ecmeta);
-        byte[] decode = concatAll(decoder.decode(erasurec), originalSize);
+        byte[] decode = concatAll(mDecoder.decode(erasurec), originalSize);
         return MyAESCipher.myDecrypt(new SecretKeySpec(enc_sk, "AES"), decode);
     }
 
     /*
      * Compute the original data block when using secret sharing to replicate the data
      */
-    private synchronized byte[] readSecretSharing(DepSkySDataUnit reg, Share[] keyshares) throws Exception {
+    private synchronized byte[] readSecretSharing(DepSkyDataUnit reg, Share[] keyshares) throws Exception {
 
         byte[] enc_sk = recombineSecretKeyShares(reg, keyshares);
 
-        return MyAESCipher.myDecrypt(new SecretKeySpec(enc_sk, "AES"), this.response);
+        return MyAESCipher.myDecrypt(new SecretKeySpec(enc_sk, "AES"), this.mResponse);
     }
 
     /*
      * Compute the original data block when using erasure codes to replicate the data
      */
-    private synchronized byte[] readErasureCodes(DepSkySDataUnit reg, Map<String, byte[]> erasurec)
+    private synchronized byte[] readErasureCodes(DepSkyDataUnit reg, Map<String, byte[]> erasurec)
         throws Exception {
 
         int originalSize = Integer.parseInt(reg.getErCodesReedSolMeta().split(";")[0]);
         byte[] ecmeta = reg.getErCodesReedSolMeta().replace(";", "\r\n").getBytes();
         erasurec.put("metadata", ecmeta);
-        byte[] decode = concatAll(decoder.decode(erasurec), originalSize);
+        byte[] decode = concatAll(mDecoder.decode(erasurec), originalSize);
 
         return decode;
     }
@@ -712,29 +695,29 @@ public class DepSkySClient implements IDepSkySProtocol {
      * @return the identifier for the next broadcast
      */
     private synchronized int getNextSequence() {
-        sequence++;
-        return sequence;
+        mSequence++;
+        return mSequence;
     }
 
     // to be utilized by the lock algorithm
-    private void writeQuorum(DepSkySDataUnit reg, byte[] value, String filename) {
+    private void writeQuorum(DepSkyDataUnit reg, byte[] value, String filename) {
 
         CloudRepliesControlSet rcs = null;
         try {
             int seq = getNextSequence();
             rcs = new CloudRepliesControlSet(N, seq);
-            replies.put(seq, rcs);
+            mReplies.put(seq, rcs);
 
             for (int i = 0; i < mCloudManagers.length; i++) {
-                CloudRequest r =
-                    new CloudRequest(DepSkySCloudManager.NEW_DATA, reg.getContainerId(mCloudManagers[i]
+                GeneralCloudRequest r =
+                    new GeneralCloudRequest(DepSkyCloudManager.NEW_DATA, reg.getContainerId(mCloudManagers[i]
                         .getCloudId()), filename, System.currentTimeMillis());
-                r.setmSeqNumber(sequence);
+                r.setmSeqNumber(mSequence);
                 r.setmW_data(value);
                 r.setReg(reg);
-                r.setmProtoOp(DepSkySManager.WRITE_PROTO);
+                r.setmProtoOp(DepSkyManager.WRITE_PROTO);
                 r.setmIsMetadataFile(true);
-                manager.doRequest(mCloudManagers[i].getCloudId(), r);
+                mDepSkyManager.doRequest(mCloudManagers[i].getCloudId(), r);
             }
 
             rcs.getWaitReplies().acquire();
@@ -744,28 +727,28 @@ public class DepSkySClient implements IDepSkySProtocol {
     }
 
     // to be utilized by the lock algorithm
-    private LinkedList<byte[]> readQuorum(DepSkySDataUnit reg, String filename) {
+    private LinkedList<byte[]> readQuorum(DepSkyDataUnit reg, String filename) {
 
         CloudRepliesControlSet rcs = null;
         try {
             int seq = getNextSequence();
             rcs = new CloudRepliesControlSet(N, seq);
-            replies.put(seq, rcs);
+            mReplies.put(seq, rcs);
 
             for (int i = 0; i < mCloudManagers.length; i++) {
-                CloudRequest r =
-                    new CloudRequest(DepSkySCloudManager.GET_DATA, reg.getContainerId(mCloudManagers[i]
+                GeneralCloudRequest r =
+                    new GeneralCloudRequest(DepSkyCloudManager.GET_DATA, reg.getContainerId(mCloudManagers[i]
                         .getCloudId()), filename, System.currentTimeMillis());
-                r.setmSeqNumber(sequence);
+                r.setmSeqNumber(mSequence);
                 r.setReg(reg);
-                r.setmProtoOp(DepSkySManager.READ_PROTO);
-                manager.doRequest(mCloudManagers[i].getCloudId(), r);
+                r.setmProtoOp(DepSkyManager.READ_PROTO);
+                mDepSkyManager.doRequest(mCloudManagers[i].getCloudId(), r);
             }
 
             rcs.getWaitReplies().acquire();
             LinkedList<byte[]> readvalue = new LinkedList<byte[]>();
             for (int i = 0; i < rcs.getReplies().size(); i++) {
-                CloudReply r = rcs.getReplies().get(i);
+                DataCloudReply r = rcs.getReplies().get(i);
                 if (r.getmVersionNumber().equals("true") && r.getmResponse() != null) {
                     byte[] data = (byte[])r.getmResponse();
                     readvalue.add(data);
@@ -779,29 +762,29 @@ public class DepSkySClient implements IDepSkySProtocol {
     }
 
     // to be utilized by the lock algorithm
-    private LinkedList<LinkedList<String>> listQuorum(DepSkySDataUnit reg) throws Exception {
+    private LinkedList<LinkedList<String>> listQuorum(DepSkyDataUnit reg) throws Exception {
 
         CloudRepliesControlSet rcs = null;
         try {
             int seq = getNextSequence();
             rcs = new CloudRepliesControlSet(N, seq);
-            replies.put(seq, rcs);
+            mReplies.put(seq, rcs);
 
             for (int i = 0; i < mCloudManagers.length; i++) {
-                CloudRequest r =
-                    new CloudRequest(DepSkySCloudManager.LIST, reg.getContainerId(mCloudManagers[i]
+                GeneralCloudRequest r =
+                    new GeneralCloudRequest(DepSkyCloudManager.LIST, reg.getContainerId(mCloudManagers[i]
                         .getCloudId()), "", System.currentTimeMillis());
-                r.setmSeqNumber(sequence);
+                r.setmSeqNumber(mSequence);
                 r.setmIsMetadataFile(true);
                 r.setReg(reg);
-                manager.doRequest(mCloudManagers[i].getCloudId(), r);
+                mDepSkyManager.doRequest(mCloudManagers[i].getCloudId(), r);
             }
 
             LinkedList<LinkedList<String>> listPerClouds = new LinkedList<LinkedList<String>>();
             rcs.getWaitReplies().acquire();
             int nullcounter = 0;
             for (int i = 0; i < rcs.getReplies().size(); i++) {
-                CloudReply r = rcs.getReplies().get(i);
+                DataCloudReply r = rcs.getReplies().get(i);
 
                 if (r.getmListNames() == null) {
                     nullcounter++;
@@ -821,22 +804,22 @@ public class DepSkySClient implements IDepSkySProtocol {
     }
 
     // to be utilized by the lock algorithm
-    private void deleteData(DepSkySDataUnit reg, String name) {
+    private void deleteData(DepSkyDataUnit reg, String name) {
 
         CloudRepliesControlSet rcs = null;
         try {
             int seq = getNextSequence();
             rcs = new CloudRepliesControlSet(N, seq);
-            replies.put(seq, rcs);
+            mReplies.put(seq, rcs);
 
             for (int i = 0; i < mCloudManagers.length; i++) {
-                CloudRequest r =
-                    new CloudRequest(DepSkySCloudManager.DEL_DATA, reg.getContainerId(mCloudManagers[i]
+                GeneralCloudRequest r =
+                    new GeneralCloudRequest(DepSkyCloudManager.DEL_DATA, reg.getContainerId(mCloudManagers[i]
                         .getCloudId()), name, System.currentTimeMillis());
-                r.setmSeqNumber(sequence);
+                r.setmSeqNumber(mSequence);
                 r.setmIsMetadataFile(true);
                 r.setReg(reg);
-                manager.doRequest(mCloudManagers[i].getCloudId(), r);
+                mDepSkyManager.doRequest(mCloudManagers[i].getCloudId(), r);
             }
             rcs.getWaitReplies().acquire();
 
@@ -849,21 +832,17 @@ public class DepSkySClient implements IDepSkySProtocol {
     /*
      * Get the metadata file (used for read, write and delete operations)
      */
-    private void broadcastGetMetadata(int sequence, DepSkySDataUnit reg, int protoOp, byte[] hashMatching) {
+    private void broadcastGetMetadata(long pSequence, DepSkyDataUnit pUnit, int protoOp, byte[] hashMatching) {
 
         for (int i = 0; i < mCloudManagers.length; i++) {
-            CloudRequest r =
-                new CloudRequest(DepSkySCloudManager.GET_DATA, reg.getContainerName(), reg
-                    .getMetadataFileName(), System.currentTimeMillis());
-            r.setmSeqNumber(sequence);
-            r.setmProtoOp(protoOp);
-            r.setmHashMatching(hashMatching);
-            r.setmIsMetadataFile(true);
-            r.setReg(reg);
-            if (reg.getContainerId(mCloudManagers[i].getCloudId()) == null) {
-                reg.setContainerId(mCloudManagers[i].getCloudId(), reg.getContainerName());
-            }
-            manager.doRequest(mCloudManagers[i].getCloudId(), r);
+            GeneralCloudRequest r =
+                new GeneralCloudRequest(DepSkyCloudManager.GET_META, pUnit, pSequence, System
+                    .currentTimeMillis());
+            r.setProtoOp(protoOp);
+            r.setHashMatching(hashMatching);
+            r.setDataUnit(pUnit);
+
+            mDepSkyManager.doRequest(mCloudManagers[i].getCloudId(), r);
         }
 
     }
@@ -872,7 +851,7 @@ public class DepSkySClient implements IDepSkySProtocol {
      * TODO: adapt to jclouds
      * NOT CURRENTLY USED
      */
-    private void broadcastSetContainersACL(int sequence, DepSkySDataUnit reg, int protoOp, long version,
+    private void broadcastSetContainersACL(int sequence, DepSkyDataUnit reg, int protoOp, long version,
         String permission, LinkedList<Pair<String, String>> cannonicalIds) {
 
         // for (int i = 0; i < drivers.length; i++) {
@@ -893,7 +872,7 @@ public class DepSkySClient implements IDepSkySProtocol {
      * TODO: adapt to jclouds
      * NOT CURRENTLY USED
      */
-    private void perDriverAclRequest(int sequence, DepSkySDataUnit reg, int protoOp, long version,
+    private void perDriverAclRequest(int sequence, DepSkyDataUnit reg, int protoOp, long version,
         int driverPosition, String permission, String canonicalId) {
 
         // CloudRequest r =
@@ -906,27 +885,27 @@ public class DepSkySClient implements IDepSkySProtocol {
     /*
      * Broadcast to write new data when using DepSky-A
      */
-    private void broadcastWriteValueRequests(int sequence, DepSkySDataUnit reg, byte[] value, String version,
+    private void broadcastWriteValueRequests(int sequence, DepSkyDataUnit reg, byte[] value, String version,
         byte[] allDataHash) {
 
         for (int i = 0; i < mCloudManagers.length; i++) {
-            CloudRequest r =
-                new CloudRequest(DepSkySCloudManager.NEW_DATA, reg.getContainerName(), reg
+            GeneralCloudRequest r =
+                new GeneralCloudRequest(DepSkyCloudManager.NEW_DATA, reg.getContainerName(), reg
                     .getGivenVersionValueDataFileName(version), System.currentTimeMillis());
             r.setmSeqNumber(sequence);
-            r.setmProtoOp(DepSkySManager.WRITE_PROTO);
+            r.setmProtoOp(DepSkyManager.WRITE_PROTO);
             r.setmAllDataHash(allDataHash);
             r.setmVersionNumber(version);
             r.setmW_data(value);
             r.setReg(reg);
-            manager.doRequest(mCloudManagers[i].getCloudId(), r);
+            mDepSkyManager.doRequest(mCloudManagers[i].getCloudId(), r);
         }
     }
 
     /*
      * Broadcast to write new data when using DepSky-CA
      */
-    private void broadcastWriteValueErasureCodesAndSecretKeyShares(int sequence, DepSkySDataUnit reg,
+    private void broadcastWriteValueErasureCodesAndSecretKeyShares(int sequence, DepSkyDataUnit reg,
         byte[] value, String version, byte[] allDataHash) throws Exception {
 
         SecretKey key = MyAESCipher.generateSecretKey();
@@ -934,7 +913,7 @@ public class DepSkySClient implements IDepSkySProtocol {
 
         Share[] keyshares = getKeyShares(reg, key.getEncoded());
 
-        Map<String, byte[]> valueErasureCodes = encoder.encode(ciphValue);
+        Map<String, byte[]> valueErasureCodes = mEncoder.encode(ciphValue);
         byte[] metabytes = valueErasureCodes.get("metadata");
         valueErasureCodes.remove("metadata");
         reg.setErCodesReedSolMeta(metabytes);
@@ -951,16 +930,16 @@ public class DepSkySClient implements IDepSkySProtocol {
             oos.writeObject(obj);
             oos.close();
             // send request
-            CloudRequest r =
-                new CloudRequest(DepSkySCloudManager.NEW_DATA, reg.getContainerName(), reg
+            GeneralCloudRequest r =
+                new GeneralCloudRequest(DepSkyCloudManager.NEW_DATA, reg.getContainerName(), reg
                     .getGivenVersionValueDataFileName(version), System.currentTimeMillis());
             r.setmSeqNumber(sequence);
-            r.setmProtoOp(DepSkySManager.WRITE_PROTO);
+            r.setmProtoOp(DepSkyManager.WRITE_PROTO);
             r.setmAllDataHash(allDataHash);
             r.setmVersionNumber(version);
             r.setReg(reg);
             r.setmW_data(data2write.toByteArray());
-            manager.doRequest(mCloudManagers[i].getCloudId(), r);
+            mDepSkyManager.doRequest(mCloudManagers[i].getCloudId(), r);
         }
 
     }
@@ -968,9 +947,9 @@ public class DepSkySClient implements IDepSkySProtocol {
     /*
      * Broadcast to write new data when using only erasure codes (not use secret sharing)
      */
-    private void broadcastWriteValueErasureCodes(int sequence, DepSkySDataUnit reg, byte[] value,
+    private void broadcastWriteValueErasureCodes(int sequence, DepSkyDataUnit reg, byte[] value,
         String version, byte[] allDataHash) throws Exception {
-        Map<String, byte[]> valueErasureCodes = encoder.encode(value);
+        Map<String, byte[]> valueErasureCodes = mEncoder.encode(value);
         byte[] metabytes = valueErasureCodes.get("metadata");
         valueErasureCodes.remove("metadata");
         // SET META OF ENCODE FILE
@@ -998,23 +977,23 @@ public class DepSkySClient implements IDepSkySProtocol {
                 }
             }
 
-            CloudRequest r =
-                new CloudRequest(DepSkySCloudManager.NEW_DATA, aux, reg
+            GeneralCloudRequest r =
+                new GeneralCloudRequest(DepSkyCloudManager.NEW_DATA, aux, reg
                     .getGivenVersionValueDataFileName(version), System.currentTimeMillis());
             r.setmSeqNumber(sequence);
-            r.setmProtoOp(DepSkySManager.WRITE_PROTO);
+            r.setmProtoOp(DepSkyManager.WRITE_PROTO);
             r.setmAllDataHash(allDataHash);
             r.setmVersionNumber(version);
             r.setReg(reg);
             r.setmW_data(data2write.toByteArray());
-            manager.doRequest(mCloudManagers[i].getCloudId(), r);
+            mDepSkyManager.doRequest(mCloudManagers[i].getCloudId(), r);
         }
     }
 
     /*
      * Broadcast to write new data when using only secret sharing (not use erasure codes)
      */
-    private void broadcastWriteValueSecretKeyShares(int sequence, DepSkySDataUnit reg, byte[] value,
+    private void broadcastWriteValueSecretKeyShares(int sequence, DepSkyDataUnit reg, byte[] value,
         String version, byte[] allDataHash) throws Exception {
 
         SecretKey key = MyAESCipher.generateSecretKey();
@@ -1031,21 +1010,21 @@ public class DepSkySClient implements IDepSkySProtocol {
             oos.writeObject(obj);
             oos.close();
             // send request
-            CloudRequest r =
-                new CloudRequest(DepSkySCloudManager.NEW_DATA, reg.getContainerName(), reg
+            GeneralCloudRequest r =
+                new GeneralCloudRequest(DepSkyCloudManager.NEW_DATA, reg.getContainerName(), reg
                     .getGivenVersionValueDataFileName(version), System.currentTimeMillis());
             r.setmSeqNumber(sequence);
-            r.setmProtoOp(DepSkySManager.WRITE_PROTO);
+            r.setmProtoOp(DepSkyManager.WRITE_PROTO);
             r.setmAllDataHash(allDataHash);
             r.setmVersionNumber(version);
             r.setReg(reg);
             r.setmW_data(data2write.toByteArray());
-            manager.doRequest(mCloudManagers[i].getCloudId(), r);
+            mDepSkyManager.doRequest(mCloudManagers[i].getCloudId(), r);
         }
 
     }
 
-    private Share[] getKeyShares(DepSkySDataUnit reg, byte[] secretkey) throws Exception {
+    private Share[] getKeyShares(DepSkyDataUnit reg, byte[] secretkey) throws Exception {
 
         PVSSEngine engine = PVSSEngine.getInstance(N, T, NUM_BITS);
         PublicInfo info = engine.getPublicInfo();
@@ -1076,7 +1055,7 @@ public class DepSkySClient implements IDepSkySProtocol {
         return null;
     }
 
-    private byte[] recombineSecretKeyShares(DepSkySDataUnit reg, Share[] shares) throws IOException,
+    private byte[] recombineSecretKeyShares(DepSkyDataUnit reg, Share[] shares) throws IOException,
         ClassNotFoundException, InvalidVSSScheme {
         PVSSEngine engine = PVSSEngine.getInstance(reg.info);
         Share[] orderedShares = new Share[N];
@@ -1124,8 +1103,7 @@ public class DepSkySClient implements IDepSkySProtocol {
                     .append(File.separator).append("resources").append(File.separator).append(
                         "account.props.yml").toString();
             in = new FileInputStream(new File(yamlPath));
-        }
-        else{
+        } else {
             in = new FileInputStream(new File(mConfigPath));
         }
         yaml = new Yaml();
@@ -1134,62 +1112,62 @@ public class DepSkySClient implements IDepSkySProtocol {
     }
 
     public HashMap<Integer, CloudRepliesControlSet> getReplies() {
-        return replies;
+        return mReplies;
     }
 
     public void setReplies(HashMap<Integer, CloudRepliesControlSet> replies) {
-        this.replies = replies;
+        this.mReplies = replies;
     }
 
-    public List<CloudReply> getLastReadReplies() {
-        return lastReadReplies;
+    public List<DataCloudReply> getLastReadReplies() {
+        return mLastReadReplies;
     }
 
-    public void setLastReadReplies(List<CloudReply> lastReadReplies) {
-        this.lastReadReplies = lastReadReplies;
+    public void setLastReadReplies(List<DataCloudReply> lastReadReplies) {
+        this.mLastReadReplies = lastReadReplies;
     }
 
-    public List<CloudReply> getLastMetadataReplies() {
-        return lastMetadataReplies;
+    public List<DataCloudReply> getLastMetadataReplies() {
+        return mLastMetadataReplies;
     }
 
-    public void setLastMetadataReplies(List<CloudReply> lastMetadataReplies) {
-        this.lastMetadataReplies = lastMetadataReplies;
+    public void setLastMetadataReplies(List<DataCloudReply> lastMetadataReplies) {
+        this.mLastMetadataReplies = lastMetadataReplies;
     }
 
     public int getLastReadMetadataSequence() {
-        return lastReadMetadataSequence;
+        return mLastReadMetadataSequence;
     }
 
     public void setLastReadMetadataSequence(int lastReadMetadataSequence) {
-        this.lastReadMetadataSequence = lastReadMetadataSequence;
+        this.mLastReadMetadataSequence = lastReadMetadataSequence;
     }
 
     public int getLastReadRepliesMaxVerIdx() {
-        return lastReadRepliesMaxVerIdx;
+        return mLastReadRepliesMaxVerIdx;
     }
 
     public void setLastReadRepliesMaxVerIdx(int lastReadRepliesMaxVerIdx) {
-        this.lastReadRepliesMaxVerIdx = lastReadRepliesMaxVerIdx;
+        this.mLastReadRepliesMaxVerIdx = lastReadRepliesMaxVerIdx;
     }
 
     public boolean isSentOne() {
-        return sentOne;
+        return mSentOne;
     }
 
     public void setSentOne(boolean sentOne) {
-        this.sentOne = sentOne;
+        this.mSentOne = sentOne;
     }
 
     public byte[] getResponse() {
-        return response;
+        return mResponse;
     }
 
     public void setResponse(byte[] response) {
-        this.response = response;
+        this.mResponse = response;
     }
 
     public void setClientId(int clientId) {
-        this.clientId = clientId;
+        this.mClientId = clientId;
     }
 }

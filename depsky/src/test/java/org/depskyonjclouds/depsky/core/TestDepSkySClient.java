@@ -8,8 +8,10 @@ import org.testng.annotations.Test;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.AfterClass;
 
-import depskys.core.DepSkySClient;
-import depskys.core.DepSkySDataUnit;
+import depskys.core.DefaultClient;
+import depskys.core.DepSkyDataUnit;
+import depskys.core.IDepSkyClient;
+import depskys.core.IDepSkyClient.DepSkyClientFactory;
 import static org.testng.Assert.*;
 
 /**
@@ -19,7 +21,7 @@ import static org.testng.Assert.*;
  */
 public class TestDepSkySClient {
     
-  private DepSkySClient mClient;
+  private IDepSkyClient mClient;
   private String mConfigPath;
   
   @BeforeClass
@@ -28,12 +30,16 @@ public class TestDepSkySClient {
       mConfigPath = new StringBuilder().append("src").append(File.separator).append("test")
       .append(File.separator).append("resources").append(File.separator).append(
       "account.props.yml").toString();
-      mClient = new DepSkySClient(new Random().nextInt(221412), mConfigPath);
+      
+      // Using a different configuration path here.
+      // It is wise not to use one with real credentials within the project,
+      // if you don't want to upload it to a public repository.
+      mClient = DepSkyClientFactory.create(new Random().nextInt(221412), mConfigPath);
   }
   
   @Test
   public void testWriteReadData() throws Exception{
-      DepSkySDataUnit dataU = new DepSkySDataUnit("test");
+      DepSkyDataUnit dataU = new DepSkyDataUnit("test");
       System.out.println(dataU);
       long acMil = System.currentTimeMillis();
 
