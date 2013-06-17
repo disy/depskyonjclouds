@@ -35,7 +35,7 @@ re-programming the read and write operations on the client side. Since the metad
 This work released in the Apache License 2.0.
 
 ## Involved People
-This project is supervised by Sebastian Grad from the Distributed System Group at the University of Konstanz.
+This project is supervised by Sebastian Graf from the Distributed System Group at the University of Konstanz.
 
-* Sebastian Grad (Project Lead)
+* Sebastian Graf (Project Lead)
 * Andreas Rain (Reprogramming & Redesign of the System)
