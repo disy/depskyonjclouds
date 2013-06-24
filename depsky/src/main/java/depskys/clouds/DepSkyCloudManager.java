@@ -5,6 +5,7 @@ import static com.google.common.collect.Iterables.contains;
 
 import java.io.File;
 import java.util.LinkedList;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
@@ -31,6 +32,8 @@ import com.google.common.io.ByteStreams;
 
 import depskys.clouds.replys.DataCloudReply;
 import depskys.clouds.replys.ICloudReply;
+import depskys.clouds.replys.ListCloudReply;
+import depskys.clouds.requests.DeleteCloudRequest;
 import depskys.clouds.requests.GeneralCloudRequest;
 import depskys.clouds.requests.ICloudRequest;
 import depskys.core.IDepSkyClient;
@@ -87,8 +90,7 @@ public class DepSkyCloudManager implements Callable<Void> {
     /** Determine whether this manager should terminate or not */
     private boolean mTerminate = false;
 
-    public DepSkyCloudManager(Account account, ICloudDataManager pCloudDataManager,
-        IDepSkyClient pDepskys) {
+    public DepSkyCloudManager(Account account, ICloudDataManager pCloudDataManager, IDepSkyClient pDepskys) {
 
         // Getting the properties
         mProvider = account.getType();
@@ -96,25 +98,26 @@ public class DepSkyCloudManager implements Callable<Void> {
         String credential = account.getSecretKey();
         mCloudId = account.getId();
         // Checking if the provider is valid.
-        checkArgument(contains(allKeys, mProvider), "provider %s not in supported list: %s", mProvider, allKeys);
+        checkArgument(contains(allKeys, mProvider), "provider %s not in supported list: %s", mProvider,
+            allKeys);
 
         // Creating the context using the given properties
-        if(mProvider.equals("filesystem")){
+        if (mProvider.equals("filesystem")) {
             Properties properties = new Properties();
-            properties.setProperty(FilesystemConstants.PROPERTY_BASEDIR, new StringBuilder().append("local").append(File.separator).append("filesystem" + mCloudId).toString());
+            properties.setProperty(FilesystemConstants.PROPERTY_BASEDIR, new StringBuilder().append("local")
+                .append(File.separator).append("filesystem" + mCloudId).toString());
             mBlobStoreContext =
-            ContextBuilder.newBuilder(mProvider).credentials(identity, credential).overrides(properties).buildView(
-                BlobStoreContext.class);
-        }
-        else{
+                ContextBuilder.newBuilder(mProvider).credentials(identity, credential).overrides(properties)
+                    .buildView(BlobStoreContext.class);
+        } else {
             mBlobStoreContext =
                 ContextBuilder.newBuilder(mProvider).credentials(identity, credential).buildView(
                     BlobStoreContext.class);
         }
-        
+
         // Create Container
         mBlobStore = mBlobStoreContext.getBlobStore();
-        
+
         this.mRequests = new LinkedBlockingQueue<ICloudRequest>();
         this.mReplies = new LinkedBlockingQueue<ICloudReply>();
         this.mCloudDataManager = pCloudDataManager;
@@ -126,21 +129,22 @@ public class DepSkyCloudManager implements Callable<Void> {
      */
     public Void call() {
         while (true) {
-                if (mTerminate && mReplies.isEmpty() && mRequests.isEmpty()) {
-                    return null;
-                } else {
-                    // Each process method will block automatically if no elements are available.
-                    processRequest(); // Process next request in queue
-                    processReply(); // Process next reply in queue
-                }
+            if (mTerminate && mReplies.isEmpty() && mRequests.isEmpty()) {
+                return null;
+            } else {
+                // Each process method will block automatically if no elements are available.
+                processRequest(); // Process next request in queue
+                processReply(); // Process next reply in queue
+            }
         }
     }
 
     /**
      * Do a request on this cloud provider.
+     * 
      * @param request
      */
-    public synchronized void doRequest(GeneralCloudRequest request) {
+    public synchronized void doRequest(ICloudRequest request) {
         if (!mTerminate) {
             mRequests.offer(request);
         }
@@ -149,9 +153,10 @@ public class DepSkyCloudManager implements Callable<Void> {
 
     /**
      * Add a reply by this cloud provider.
+     * 
      * @param reply
      */
-    public synchronized void addReply(DataCloudReply reply) {
+    public synchronized void addReply(ICloudReply reply) {
         if (!mTerminate) {
             mReplies.offer(reply);
         }
@@ -161,250 +166,162 @@ public class DepSkyCloudManager implements Callable<Void> {
      * Process received requests
      */
     private void processRequest() {
-        GeneralCloudRequest request = null;
-        DataCloudReply r = null;
+        ICloudRequest request = null;
+        ICloudReply r = null;
         long init = 0;
         try {
-            
+
             Blob blob = null;
-            Object response = null;
             request = mRequests.take();
-            switch (request.getmOp()) {
+            byte[] response = null;
+            switch (request.getOp()) {
             case DEL_CONT:
 
                 // Delete all the files in this container (metadata and data files)
-                
-                for(String containerName : request.getmNamesToDelete()){
-                    mBlobStore.deleteContainer(containerName);
+
+                for (String deleteBlob : ((DeleteCloudRequest)request).getNamesToDelete()) {
+                    mBlobStore.removeBlob(request.getDataUnit().getContainerName(), deleteBlob);
                 }
                 break;
             case NEW_DATA:
                 init = System.currentTimeMillis();
                 // Writes new data in the cloud
-                
-                
-                BlobMessage message = new BlobMessage(String.valueOf(request.getmOp()), request.getmW_data());
-                message.addArg(request.getmContainerName());
-                message.addArg(request.getmDataFileName());
-                
-                ByteArrayDataOutput out = ByteStreams.newDataOutput();
-                message.serialize(out);
-                
-                if(!mBlobStore.containerExists(request.getmContainerName())){
-                    mBlobStore.createContainerInLocation(null, request.getmContainerName());
+                if (!mBlobStore.containerExists(request.getDataUnit().getContainerName())) {
+                    mBlobStore.createContainerInLocation(null, request.getDataUnit().getContainerName());
                 }
-                
-                blob = mBlobStore.blobBuilder(request.getmDataFileName()).payload(out.toByteArray()).build();
-                putBlobMeta(blob, request);
-                response = mBlobStore.putBlob(request.getmContainerName(), blob);
-                
-                r = new DataCloudReply(request.getmSeqNumber(), mCloudId, response, System.currentTimeMillis());
-                r.setmOp(request.getmOp());
-                r.setmDataUnit(request.getReg());
-                r.setmIsMetadataFile(request.ismIsMetadataFile());
-                r.setmValue(request.getmW_data());
-                r.setmVersionNumber(request.getmVersionNumber());
-                r.setmAllDataHash(request.getmAllDataHash());
 
-                r.setmInitReceiveTime(init);
-                if (request.getmDataFileName().contains("metadata") && request.ismIsMetadataFile()) {
-                    r.setmReceiveTime(System.currentTimeMillis());
-                    r.setmStartTime(request.getmStartTime());
-                    r.setmContainerName(request.getmContainerName());
-                }
-                
-                r.setmType(NEW_DATA);
+                blob =
+                    mBlobStore.blobBuilder(request.getDataUnit().getValueDataFileNameLastKnownVersion())
+                        .payload(request.getData()).build();
+                putBlobMeta(blob, request);
+                response = mBlobStore.putBlob(request.getDataUnit().getContainerName(), blob).getBytes();
+
+                r = 
+                    new DataCloudReply(request.getOp(), request.getSequenceNumber(), mCloudId, request.getDataUnit(), response, System.currentTimeMillis());
+
+                ((DataCloudReply) r).setInitReceiveTime(init);
 
                 addReply(r);
                 break;
             case GET_DATA:
                 init = System.currentTimeMillis();
                 // download a file from the cloud
-                mBlobStore.createContainerInLocation(null, request.getmContainerName());
+                if (!mBlobStore.containerExists(request.getDataUnit().getContainerName())) {
+                    return;
+                }
                 
-                blob = mBlobStore.getBlob(request.getmContainerName(), request.getmDataFileName());
-                String versionNumber = "true";
-                String versionHash = "true";
+                blob = mBlobStore.getBlob(request.getDataUnit().getContainerName(), request.getDataUnit().getValueDataFileNameLastKnownVersion());
+                response = (byte[])blob.getPayload().getRawContent();
+                r =
+                    new DataCloudReply(request.getOp(), request.getSequenceNumber(), mCloudId, request.getDataUnit(), response, System.currentTimeMillis());
                 if(blob != null){
-                    r = new DataCloudReply(request.getmSeqNumber(), mCloudId, blob.getPayload().getRawContent(), System.currentTimeMillis());
-                    versionNumber = blob.getMetadata().getUserMetadata().get("versionNumber");
-                    versionHash = blob.getMetadata().getUserMetadata().get("versionNumber");
-                }
-                else{
-                    r = new DataCloudReply(request.getmSeqNumber(), mCloudId, null, System.currentTimeMillis());
-                }
-                r.setmOp(request.getmOp());
-                r.setmProtoOp(request.getmProtoOp());
-                r.setmContainerName(request.getmContainerName());
-                r.setmDataUnit(request.getReg());
-                r.setmIsMetadataFile(request.ismIsMetadataFile());
-                r.setmValue(request.getmW_data());
-                r.setmVersionNumber(versionNumber);
-                r.setmVHash(versionHash);
-                r.setmAllDataHash(request.getmAllDataHash());
-                r.setmHashMatching(request.getmHashMatching());
-
-                r.setmInitReceiveTime(init);
-                r.setmStartTime(request.getmStartTime());
-                if (request.ismIsMetadataFile()) {
-                    r.setmMetadataReceiveTime(System.currentTimeMillis());
-                } else {
-                    r.setmMetadataReceiveTime(request.getmMetadataReceiveTime());
+                    ((DataCloudReply) r).setVersionNumber(blob.getMetadata().getUserMetadata().get("versionNumber"));
+                    ((DataCloudReply) r).setVHash(blob.getMetadata().getUserMetadata().get("versionHash"));
+                    ((DataCloudReply) r).setAllDataHash(blob.getMetadata().getUserMetadata().get("allDataHash").getBytes());
                 }
                 
-                r.setmType(GET_DATA);
+
+                ((DataCloudReply)r).setInitReceiveTime(init);
+                ((DataCloudReply)r).setStartTime(request.getStartTime());
 
                 addReply(r);
                 break;
             case DEL_DATA:
-
                 // delete a file from the cloud
-                mBlobStore.removeBlob(request.getmContainerName(), request.getmDataFileName());
-                
-                r = new DataCloudReply(request.getmSeqNumber(), mCloudId, true, System.currentTimeMillis());
-                r.setmOp(request.getmOp());
-                r.setmProtoOp(request.getmProtoOp());
-                r.setmContainerName(request.getmContainerName());
-                r.setmDataUnit(request.getReg());
-                r.setmIsMetadataFile(request.ismIsMetadataFile());
-                r.setmHashMatching(request.getmHashMatching());
-                
-                r.setmType(DEL_DATA);
-                
-                addReply(r);
+                mBlobStore.removeBlob(request.getDataUnit().getContainerName(), request.getDataUnit().getValueDataFileNameLastKnownVersion());
                 break;
             case LIST:
 
                 // list all the files in the cloud that are in the given container
-                PageSet<? extends StorageMetadata> list =mBlobStore.list(request.getmContainerName());
-                LinkedList<String> names = new LinkedList<String>();
-                for(StorageMetadata meta : list){
+                PageSet<? extends StorageMetadata> list = mBlobStore.list(request.getDataUnit().getContainerName());
+                List<String> names = new LinkedList<String>();
+                for (StorageMetadata meta : list) {
                     names.add(meta.getName());
                 }
-                
-                r = new DataCloudReply(request.getmSeqNumber(), mCloudId, true, System.currentTimeMillis());
 
-                r.setmOp(request.getmOp());
-                r.setmProtoOp(request.getmProtoOp());
-                r.setmContainerName(request.getmContainerName());
-                r.setmDataUnit(request.getReg());
-                r.setmIsMetadataFile(request.ismIsMetadataFile());
-                r.setmValue(request.getmW_data());
-                r.setmVersionNumber(request.getmVersionNumber());
-                r.setmAllDataHash(request.getmAllDataHash());
-                r.setmListNames(names);
-                
-                r.setmType(LIST);
+                r = new ListCloudReply(request.getOp(), request.getSequenceNumber(), mCloudId, request.getDataUnit(), names, System.currentTimeMillis());
 
                 addReply(r);
                 break;
-            case SET_ACL:
-                r = new DataCloudReply(request.getmSeqNumber(), mCloudId, false, System.currentTimeMillis());
-                r.setmOp(request.getmOp());
-                r.setmProtoOp(request.getmProtoOp());
-                r.setmContainerName(request.getmContainerName());
-                r.setmDataUnit(request.getReg());
-                r.setmIsMetadataFile(request.ismIsMetadataFile());
-                r.setmHashMatching(request.getmHashMatching());
-
-                r.setmType(SET_ACL);
-
-                addReply(r);
             default:
-                // System.out.println("Operation does not exist");
-
-                r = new DataCloudReply(request.getmSeqNumber(), mCloudId, null, System.currentTimeMillis());
-                r.setmOp(request.getmOp());
-                r.setmProtoOp(request.getmProtoOp());
-                r.setmContainerName(request.getmContainerName());
-                r.setmDataUnit(request.getReg());
-                r.setmIsMetadataFile(request.ismIsMetadataFile());
                 break;
             }
             // System.out.println("Request Processed: " + request);
         } catch (Exception ex) {
             // ex.printStackTrace();//testing purposes
-            if (request.getmRetries() < MAX_RETRIES) {
+            if (request.getRetries() < MAX_RETRIES) {
                 // retry (issue request to cloud again)
                 request.incrementRetries();
                 doRequest(request);
-                // System.out.println("Retrying(#" + request.retries + ") request: " + request + " " +
-                // driver.getDriverId());
                 return;
             }
-            // after MAX_REPLIES return null response
-
-            r = new DataCloudReply(request.getmSeqNumber(), mCloudId, null, System.currentTimeMillis());
-            r.setmOp(request.getmOp());
-            r.setmProtoOp(request.getmProtoOp());
-            r.setmContainerName(request.getmContainerName());
-            r.setmDataUnit(request.getReg());
-            r.setmIsMetadataFile(request.ismIsMetadataFile());
-            r.setmVersionNumber(request.getmVersionNumber());
-            r.setmVHash(request.getmVersionHash());
-            r.setmReceiveTime(System.currentTimeMillis());
-            r.setmInitReceiveTime(init);
-            r.setmExceptionMessage(ex.getMessage());
-            r.setmStartTime(request.getmStartTime());
-            r.invalidateResponse();
-            
         }
     }
 
-    private void putBlobMeta(Blob blob, GeneralCloudRequest request) {
-        blob.getMetadata().getUserMetadata().put("versionNumber", request.getmVersionNumber());
-        blob.getMetadata().getUserMetadata().put("versionHash", request.getmVersionHash());
+    private void putBlobMeta(Blob blob, ICloudRequest request) {
+        blob.getMetadata().getUserMetadata().put("lastKnownVersion", request.getDataUnit().getValueDataFileNameLastKnownVersion());
+        blob.getMetadata().getUserMetadata().put("lastVersionNumber", String.valueOf(request.getDataUnit().getLastVersionNumber()));
+        
+        if (request instanceof GeneralCloudRequest) {
+            blob.getMetadata().getUserMetadata().put("allDataHash", String.valueOf(((GeneralCloudRequest)request).getAllDataHash()));
+            blob.getMetadata().getUserMetadata().put("versionNumber", ((GeneralCloudRequest)request).getVersionNumber());
+            blob.getMetadata().getUserMetadata().put("versionHash", ((GeneralCloudRequest)request).getVersionHash());
+        }
     }
 
     /*
-     *  process received replies
+     * process received replies
      */
     private void processReply() {
         try {
-            DataCloudReply reply = mReplies.take();// processing removed reply next
+            ICloudReply reply = mReplies.take();// processing removed reply next
             if (reply == null) {
                 // System.out.println("REPLY IS NULL!!");
                 return;
             }
             // if error
-            if (reply.getmResponse() == null) {
+            if (reply.getResponse() == null) {
                 mDepskys.dataReceived(reply);
                 return;
             }
             // response may be processed
-            if (reply.getmResponse() != null) {
+            if (reply.getResponse() != null) {
                 // process not null response
-                if (reply.getmType() == SET_ACL) {
+                if (reply.getType() == SET_ACL) {
                     mDepskys.dataReceived(reply);
-                } else if (reply.getmType() == GET_DATA && reply.ismIsMetadataFile()) {
+                } else if (reply.getType() == GET_DATA && reply.ismIsMetadataFile()) {
                     /* metadata file */
                     mCloudDataManager.processMetadata(reply);
-                } else if (reply.getmType() == GET_DATA) {
+                } else if (reply.getType() == GET_DATA) {
 
-                    if (reply.getmVHash() == null)
+                    if (reply.getVHash() == null)
                         mDepskys.dataReceived(reply); /* to read quorum operation (out of the protocols) */
                     else
                         mCloudDataManager.checkDataIntegrity(reply); /* valuedata file */
-                } else if (reply.getmType() == GET_CONT_AND_DATA_ID) {
+                } else if (reply.getType() == GET_CONT_AND_DATA_ID) {
                     // send file request for metadata file ids received
-                    String[] ids = (String[])reply.getmResponse();
+                    String[] ids = (String[])reply.getResponse();
                     // update container id in local register (cid is a constant value)
-                    if (reply.getmDataUnit().getContainerId(reply.getmProviderId()) == null) {
-                        reply.getmDataUnit().setContainerId(reply.getmProviderId(), ((String[])reply.getmResponse())[0]);
+                    if (reply.getDataUnit().getContainerId(reply.getProviderId()) == null) {
+                        reply.getDataUnit().setContainerId(reply.getProviderId(),
+                            ((String[])reply.getResponse())[0]);
                     }
-                    GeneralCloudRequest r = new GeneralCloudRequest(GET_DATA, ids[0], mCloudId, reply.getmStartTime());
+                    GeneralCloudRequest r =
+                        new GeneralCloudRequest(GET_DATA, ids[0], mCloudId, reply.getStartTime());
                     r.setmDataFileName(ids[1]);
-                    r.setmContainerName(reply.getmContainerName());
-                    r.setReg(reply.getmDataUnit());
-                    r.setmSeqNumber(reply.getmSequenceNumber());
+                    r.setmContainerName(reply.getContainerName());
+                    r.setReg(reply.getDataUnit());
+                    r.setmSeqNumber(reply.getSequenceNumber());
                     r.setmIsMetadataFile(true);
-                    r.setmHashMatching(reply.getmHashMatching());
-                    
+                    r.setmHashMatching(reply.getHashMatching());
+
                     doRequest(r);
-                } else if (reply.getmType() == NEW_DATA && reply.ismIsMetadataFile() && reply.getmValue() != null) {
+                } else if (reply.getType() == NEW_DATA && reply.ismIsMetadataFile()
+                    && reply.getValue() != null) {
                     // System.out.println("WRITING METADATA for this reply" + reply);
                     mCloudDataManager.writeNewMetadata(reply);
-                } else if (reply.getmType() == NEW_DATA && reply.ismIsMetadataFile() && reply.getmValue() != null) {
+                } else if (reply.getType() == NEW_DATA && reply.ismIsMetadataFile()
+                    && reply.getValue() != null) {
                     mDepskys.dataReceived(reply);
                     return;
                 } else {
@@ -413,7 +330,7 @@ public class DepSkyCloudManager implements Callable<Void> {
                 }
             }
             // if after processing response was invalidated
-            if (reply.getmResponse() == null) {
+            if (reply.getResponse() == null) {
                 // deliver reply if response was null
                 mDepskys.dataReceived(reply);
                 return;
@@ -423,7 +340,7 @@ public class DepSkyCloudManager implements Callable<Void> {
         }
     }
 
-    public String getmProvider() {
+    public String getProvider() {
         return mProvider;
     }
 

@@ -24,7 +24,7 @@ public class DataCloudReply implements ICloudReply{
      * @param pResponse
      * @param pStartTime
      */
-    public DataCloudReply(int pOp, int mSequenceNumber, String pProviderId, DepSkyDataUnit pUnit, byte[] pResponse, long pStartTime) {
+    public DataCloudReply(int pOp, long mSequenceNumber, String pProviderId, DepSkyDataUnit pUnit, byte[] pResponse, long pStartTime) {
         super();
         this.mOp = pOp;
         this.mDataUnit = pUnit;

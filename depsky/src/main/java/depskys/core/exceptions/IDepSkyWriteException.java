@@ -9,5 +9,11 @@ package depskys.core.exceptions;
  *
  */
 public class IDepSkyWriteException extends DepSkyException {
-
+    public IDepSkyWriteException(){
+        
+    }
+    
+    public IDepSkyWriteException(String s) {
+        super(s);
+    }
 }

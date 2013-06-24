@@ -59,6 +59,14 @@ public class DepSkyDataUnit{
     public String getContainerName() {
         return mContainerName;
     }
+    
+    public long getLastVersionNumber() {
+        return mLastVersionNumber;
+    }
+
+    public void setLastVersionNumber(long pLastVersionNumber) {
+        this.mLastVersionNumber = pLastVersionNumber;
+    }
 
     /**
      * 

@@ -10,6 +10,11 @@ import depskys.core.DepSkyDataUnit;
  */
 public interface ICloudRequest {
     
+    public int getOp();
+    public void incrementRetries();
+    public void resetRetries();
+    public int getRetries();
+    
     /**
      * Retrieve the data unit associated with this request
      * @return {@link DepSkyDataUnit}

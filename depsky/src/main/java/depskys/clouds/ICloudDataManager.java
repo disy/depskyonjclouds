@@ -1,10 +1,11 @@
 package depskys.clouds;
 
 import depskys.clouds.replys.DataCloudReply;
+import depskys.clouds.replys.MetaCloudReply;
 
 public interface ICloudDataManager {
 
-    void processMetadata(DataCloudReply metadataReply);
+    void processMetadata(MetaCloudReply metadataReply);
 
     void checkDataIntegrity(DataCloudReply valuedataReply);
 

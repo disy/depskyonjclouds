@@ -6,5 +6,12 @@ package depskys.core.exceptions;
  *
  */
 public class DepSkyException extends Exception{
-
+    
+    public DepSkyException(){
+        
+    }
+    
+    public DepSkyException(String s) {
+        super(s);
+    }
 }

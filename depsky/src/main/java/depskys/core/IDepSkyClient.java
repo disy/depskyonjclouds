@@ -2,11 +2,7 @@ package depskys.core;
 
 import java.io.File;
 
-import depskys.clouds.replys.DataCloudReply;
-import depskys.core.exceptions.CouldNotGetDataException;
 import depskys.core.exceptions.DepSkyException;
-import depskys.core.exceptions.IDepSkyWriteException;
-import depskys.core.exceptions.NoDataAvailableException;
 
 /**
  * Interface for depskys read/write protocol
@@ -43,17 +39,7 @@ public interface IDepSkyClient {
      * @return the hash of the value written
      * 
      */
-    public byte[] write(DepSkyDataUnit pDataUnit, byte[] value) throws IDepSkyWriteException;
-
-    /**
-     * Method that releases (when receive N-F replies (in most of the cases)) all the locks made by
-     * broadcasts
-     * 
-     * @param reply
-     *            - reply received by each broadcast containing the response of the clouds
-     * 
-     */
-    public void dataReceived(DataCloudReply reply);
+    public byte[] write(DepSkyDataUnit pDataUnit, byte[] value) throws DepSkyException;
 
     public boolean sendingParallelRequests();
     
