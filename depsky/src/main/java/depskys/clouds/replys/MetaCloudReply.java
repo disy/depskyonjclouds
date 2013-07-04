@@ -12,6 +12,7 @@ public class MetaCloudReply implements ICloudReply{
     private String mCloudId, mVersionNumber, mVersionHash;
     private final DepSkyDataUnit mDataUnit;
     private long mReceiveTime, mInitReceiveTime, mStartTime;
+    private byte[] mAllDataHash;
 
     /**
      * 
@@ -22,7 +23,7 @@ public class MetaCloudReply implements ICloudReply{
      * @param pResponse
      * @param pStartTime
      */
-    public MetaCloudReply(int pOp, int mSequenceNumber, String pProviderId, DepSkyDataUnit pUnit, long pStartTime) {
+    public MetaCloudReply(int pOp, long mSequenceNumber, String pProviderId, DepSkyDataUnit pUnit, long pStartTime) {
         super();
         this.mOp = pOp;
         this.mDataUnit = pUnit;
@@ -41,6 +42,14 @@ public class MetaCloudReply implements ICloudReply{
     
     public long getSequenceNumber() {
         return mSequenceNumber;
+    }
+
+    public byte[] getAllDataHash() {
+        return mAllDataHash;
+    }
+
+    public void setAllDataHash(byte[] mAllDataHash) {
+        this.mAllDataHash = mAllDataHash;
     }
 
     public int getProtoOp() {

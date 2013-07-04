@@ -1,20 +1,19 @@
 package depskys.core;
 
-import java.io.UnsupportedEncodingException;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.security.Signature;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+
+import com.google.common.hash.HashCode;
+import com.google.common.hash.HashFunction;
+import com.google.common.hash.Hashing;
 
 import depskys.clouds.DepSkyCloudManager;
 import depskys.clouds.ICloudDataManager;
 import depskys.clouds.replys.DataCloudReply;
 import depskys.clouds.replys.MetaCloudReply;
 import depskys.clouds.requests.GeneralCloudRequest;
-import depskys.other.DepSkySKeyLoader;
 
 /**
  * Class that process and construct new metadata files, and also do some security evaluations
@@ -38,25 +37,13 @@ public class DepSkyManager implements ICloudDataManager {
      * The available cloud managers that can be used.
      */
     private DepSkyCloudManager[] mCloudManagers;
-    /**
-     * DepSkySKeyLoader
-     */
-    private DepSkySKeyLoader mKeyLoader;
-    /**
-     * Backreference to the client
-     */
-    private DefaultClient mDepSkySClient;
     
     /**
      * Multiple clouds running in background
      */
     private Map<String, ConcurrentHashMap<String, LinkedList<DepSkyMetadata>>> mClouds;
 
-    public DepSkyManager(DepSkyCloudManager[] pCloudManagers, IDepSkyClient depskys) {
-        this.mCloudManagers = pCloudManagers;
-        this.mKeyLoader = new DepSkySKeyLoader(null);
-        this.mDepSkySClient = (DefaultClient)depskys;
-
+    public DepSkyManager() {
         mClouds = new HashMap<String, ConcurrentHashMap<String,LinkedList<DepSkyMetadata>>>();
     }
     
@@ -75,48 +62,6 @@ public class DepSkyManager implements ICloudDataManager {
         }
     }
 
-    /**
-     * Signs a byte array
-     * 
-     * @param v
-     *            - content to sing
-     * @return the signature of v
-     */
-    public byte[] getSignature(byte[] v) {
-        try {
-            Signature sig = Signature.getInstance("SHA1withRSA");
-            sig.initSign(mKeyLoader.loadPrivateKey(mDepSkySClient.getClientId()));
-            sig.update(v);
-            return sig.sign();
-        } catch (Exception ex) {
-            // ex.printStackTrace();
-        }
-        return null;
-    }
-
-    /**
-     * Verify if a given signature for a given byte array is valid
-     * 
-     * @param clientId
-     *            - client id
-     * @param v
-     *            - metadata
-     * @param signature
-     *            - metadata signature
-     * @return true is a valid signature, false otherwise
-     */
-    public boolean verifyMetadataSignature(int clientId, byte[] v, byte[] signature) {
-        try {
-            Signature sig = Signature.getInstance("SHA1withRSA");
-            sig.initVerify(mKeyLoader.loadPublicKey(clientId));
-            sig.update(v);
-            return sig.verify(signature);
-        } catch (Exception ex) {
-            ex.printStackTrace();
-        }
-        return false;
-    }
-
     public DepSkyCloudManager getCloudManagerByProviderId(String id) {
         for (DepSkyCloudManager manager : mCloudManagers) {
             if (manager.getCloudId().equals(id)) {
@@ -124,35 +69,6 @@ public class DepSkyManager implements ICloudDataManager {
             }
         }
         return null;
-    }
-
-    /**
-     * Compute a hash for a given byte array
-     * 
-     * @param o
-     *            the byte array to be hashed
-     * @return the hash of the byte array
-     */
-    private byte[] getHash(byte[] v) throws NoSuchAlgorithmException {
-        // MessageDigest md = MessageDigest.getInstance("SHA-1");
-        return MessageDigest.getInstance("SHA-1").digest(v);
-    }
-
-    // base16 char table (aux in getHexString)
-    private static final byte[] HEX_CHAR_TABLE = {
-        (byte)'0', (byte)'1', (byte)'2', (byte)'3', (byte)'4', (byte)'5', (byte)'6', (byte)'7', (byte)'8',
-        (byte)'9', (byte)'a', (byte)'b', (byte)'c', (byte)'d', (byte)'e', (byte)'f'
-    };
-
-    private static String getHexString(byte[] raw) throws UnsupportedEncodingException {
-        byte[] hex = new byte[2 * raw.length];
-        int index = 0;
-        for (byte b : raw) {
-            int v = b & 0xFF;
-            hex[index++] = HEX_CHAR_TABLE[v >>> 4];
-            hex[index++] = HEX_CHAR_TABLE[v & 0xF];
-        }
-        return new String(hex, "ASCII");
     }
 
     public void doRequest(String cloudId, GeneralCloudRequest request) {
@@ -171,7 +87,11 @@ public class DepSkyManager implements ICloudDataManager {
 
     @Override
     public void checkDataIntegrity(DataCloudReply valuedataReply) {
-        // TODO Auto-generated method stub
+        HashFunction hf = Hashing.md5();
+        HashCode hc = hf.newHasher().putBytes(valuedataReply.getResponse()).hash();
+        if(valuedataReply.getAllDataHash().equals(hc.asBytes())){
+            valuedataReply.setValidResponse(true);
+        }
         
     }
 

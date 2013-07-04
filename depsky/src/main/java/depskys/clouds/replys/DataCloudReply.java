@@ -9,11 +9,12 @@ public class DataCloudReply implements ICloudReply{
 
     private final long mSequenceNumber;
     private int mOp, mProtoOp;
-    private String mCloudId, mVersionNumber, mVersionHash;
+    private String mCloudId;
     private final DepSkyDataUnit mDataUnit;
     private final byte[] mResponse;
     private byte[] mAllDataHash, mHashMatching;
     private long mReceiveTime, mInitReceiveTime, mStartTime;
+    private boolean mValidResponse = false;
 
     /**
      * 
@@ -60,22 +61,6 @@ public class DataCloudReply implements ICloudReply{
 
     public void setProviderId(String mProviderId) {
         this.mCloudId = mProviderId;
-    }
-
-    public String getVersionNumber() {
-        return mVersionNumber;
-    }
-
-    public void setVersionNumber(String mVersionNumber) {
-        this.mVersionNumber = mVersionNumber;
-    }
-
-    public String getVHash() {
-        return mVersionHash;
-    }
-
-    public void setVHash(String mVHash) {
-        this.mVersionHash = mVHash;
     }
 
     public DepSkyDataUnit getDataUnit() {
@@ -125,10 +110,13 @@ public class DataCloudReply implements ICloudReply{
     public void setStartTime(long mStartTime) {
         this.mStartTime = mStartTime;
     }
+    
+    public boolean isValidResponse() {
+        return mValidResponse;
+    }
 
-    public void invalidateResponse() {
-        this.mVersionNumber = null;
-        this.mVersionHash = null;
+    public void setValidResponse(boolean pValidResponse) {
+        this.mValidResponse = pValidResponse;
     }
 
     @Override
@@ -153,6 +141,6 @@ public class DataCloudReply implements ICloudReply{
      */
     public String toString() {
         return "sn:" + mSequenceNumber + "#cloud:" + mCloudId + "#regId:"
-            + (mDataUnit != null ? mDataUnit.getContainerName() : "null") + "#op:" + mProtoOp + "#vn:" + mVersionNumber;
+            + (mDataUnit != null ? mDataUnit.getContainerName() : "null") + "#op:" + mProtoOp;
     }
 }

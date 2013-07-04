@@ -4,8 +4,6 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.InputStream;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.text.ParseException;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -13,10 +11,11 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-import jec.ReedSolDecoder;
-import jec.ReedSolEncoder;
-
 import org.yaml.snakeyaml.Yaml;
+
+import com.google.common.hash.HashCode;
+import com.google.common.hash.HashFunction;
+import com.google.common.hash.Hashing;
 
 import depskys.clouds.CloudRepliesControlSet;
 import depskys.clouds.DepSkyCloudManager;
@@ -56,8 +55,6 @@ public class DefaultClient implements IDepSkyClient {
     private int mLastReadRepliesMaxVerIdx = -1;
     private boolean mSentOne = false;
     private byte[] mResponse = null;
-    private ReedSolDecoder mDecoder;
-    private ReedSolEncoder mEncoder;
 
     private final String mConfigPath;
 
@@ -89,7 +86,7 @@ public class DefaultClient implements IDepSkyClient {
 
         this.mCloudManagers = new DepSkyCloudManager[credentials.size()];
 
-        this.mDepSkyManager = new DepSkyManager(null, this);
+        this.mDepSkyManager = new DepSkyManager();
 
         int c = 0;
         for (Account acc : credentials) {
@@ -104,8 +101,6 @@ public class DefaultClient implements IDepSkyClient {
         this.mReplies = new HashMap<Long, CloudRepliesControlSet>();
         this.N = credentials.size();
         this.F = 1;
-        this.mEncoder = new ReedSolEncoder(N / 2, (int)Math.ceil(Double.valueOf(N) / 2), 8);
-        this.mDecoder = new ReedSolDecoder(N / 2, (int)Math.ceil(Double.valueOf(N) / 2), 8);
 
         startCloudManagers();
     }
@@ -159,7 +154,10 @@ public class DefaultClient implements IDepSkyClient {
                     throw new TooManyCloudsBrokeException();
                 }
 
-                Long rVersion = Long.valueOf(r.getVersionNumber());
+                if(r.getVersionNumber() == null){
+                    r.setVersionNumber("-1");
+                }
+                Long rVersion = Long.valueOf(r.getDataUnit().getLastVersionNumber());
 
                 // See if this version is maximal
                 if (maxVersion.equals(rVersion)) {
@@ -177,9 +175,8 @@ public class DefaultClient implements IDepSkyClient {
             mReplies.put(seq, rcs);
             
             for(MetaCloudReply maxVersionReply : maxVersionReplys){
-                DepSkyDataUnit readUnit =
-                    new DepSkyDataUnit(maxVersionReply.getDataUnit().getContainerName(), maxVersionReply
-                        .getDataUnit().getGivenVersionValueDataFileName(maxVersionReply.getVersionNumber()));
+                DepSkyDataUnit readUnit = maxVersionReply.getDataUnit();
+                readUnit.setLastVersionNumber(maxVersionReply.getDataUnit().getLastVersionNumber());
                 readUnit.setCloudRequirement(maxVersionReplys.size(), 1);
 
                 GeneralCloudRequest request =
@@ -211,6 +208,13 @@ public class DefaultClient implements IDepSkyClient {
                 mReplies.remove(rcs.getSequence());
             }
         }
+    }
+    
+    /**
+     * {@inheritDoc}
+     */
+    public List<String> list(String pContainerName){
+        return null;
     }
 
     /**
@@ -265,7 +269,10 @@ public class DefaultClient implements IDepSkyClient {
                 } else if (nullResponses > F) {
                     throw new TooManyCloudsBrokeException();
                 }
-
+                
+                if(r.getVersionNumber() == null){
+                    r.setVersionNumber("-1");
+                }
                 Long rVersion = Long.valueOf(r.getVersionNumber());
 
                 // See if this version is maximal
@@ -282,9 +289,12 @@ public class DefaultClient implements IDepSkyClient {
             seq = getNextSequence();
             wrcs = new CloudRepliesControlSet(maxVersionReplys.size(), seq);
             mReplies.put(seq, wrcs);
-            byte[] allDataHash = generateSHA1Hash(value);
             
-            broadcastWriteValueRequests(seq, pDataUnit, value, nextVersion + "", allDataHash);
+            HashFunction hf = Hashing.md5();
+            HashCode hc = hf.newHasher().putBytes(value).hash();
+
+            pDataUnit.setLastVersionNumber(nextVersion);
+            broadcastWriteValueRequests(seq, pDataUnit, value, nextVersion + "", hc.asBytes());
 
             try {
                 wrcs.getWaitReplies().acquire();
@@ -292,11 +302,35 @@ public class DefaultClient implements IDepSkyClient {
                 throw new IDepSkyWriteException("While acquiring the write request the client got interrupted.");
             }
             mLastReadReplies = wrcs.getReplies();
+            for(ICloudReply reply : mLastReadReplies){
+                pDataUnit.incrementCloudVersionCount(reply.getDataUnit().getLastVersionNumber());
+            }
 
-            pDataUnit.setLastVersionNumber(nextVersion);
-            return allDataHash;
+            return hc.asBytes();
 
     }
+
+    @Override
+    public void dataReceived(ICloudReply pReply) {
+        if(!mReplies.containsKey(pReply.getSequenceNumber())){
+            //Release already happened.
+            return;
+        }
+        
+        CloudRepliesControlSet cRcS = mReplies.get(pReply.getSequenceNumber());
+        if(cRcS != null){
+            cRcS.getReplies().add(pReply);
+        }
+        else{
+            return;
+        }
+        
+        //Releasing when 
+        if(cRcS.getReplies().size() >= N - F){
+            cRcS.getWaitReplies().release();
+        }
+    }
+    
 
     /**
      * {@inheritDoc}
@@ -390,17 +424,6 @@ public class DefaultClient implements IDepSkyClient {
             r.setData(value);
             mDepSkyManager.doRequest(mCloudManagers[i].getCloudId(), r);
         }
-    }
-    
-    private byte[] generateSHA1Hash(byte[] data) {
-        try {
-            MessageDigest sha1 = MessageDigest.getInstance("SHA-1");
-            return sha1.digest(data);
-
-        } catch (NoSuchAlgorithmException e) {
-            e.printStackTrace();
-        }
-        return null;
     }
 
     /**

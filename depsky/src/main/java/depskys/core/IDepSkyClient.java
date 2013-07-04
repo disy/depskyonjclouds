@@ -1,7 +1,9 @@
 package depskys.core;
 
 import java.io.File;
+import java.util.List;
 
+import depskys.clouds.replys.ICloudReply;
 import depskys.core.exceptions.DepSkyException;
 
 /**
@@ -40,6 +42,20 @@ public interface IDepSkyClient {
      * 
      */
     public byte[] write(DepSkyDataUnit pDataUnit, byte[] value) throws DepSkyException;
+    
+    /**
+     * 
+     * @param pContainerName
+     * @return the list of blobs contained by that container
+     * @throws DepSkyException
+     */
+    public List<String> list(String pContainerName) throws DepSkyException;
+    
+    /**
+     * 
+     * @param pReply
+     */
+    public void dataReceived(ICloudReply pReply);
 
     public boolean sendingParallelRequests();
     

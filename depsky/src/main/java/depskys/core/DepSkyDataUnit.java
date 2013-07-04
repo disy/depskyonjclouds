@@ -36,6 +36,9 @@ public class DepSkyDataUnit{
         this.mContainerName = pContainerName.toLowerCase();
         this.mUnitName = pUnitName;
         this.mLastVersionNumber = -1;
+        this.mCloudVersionCount = 0;
+        this.mHighestCloudVersion = -1L;
+        this.mCurrentHighestVersion = -1;
     }
     
     /**
@@ -88,7 +91,7 @@ public class DepSkyDataUnit{
         if (mCloudVersionCount >= n - f) {
             return mHighestCloudVersion;
         }
-        return null;
+        return mCurrentHighestVersion;
     }
 
     /**

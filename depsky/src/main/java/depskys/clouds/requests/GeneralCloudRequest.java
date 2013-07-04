@@ -23,6 +23,7 @@ public class GeneralCloudRequest implements ICloudRequest{
         this.mOp = pOp;
         this.mSequenceNumber = pSequenceNumber;
         this.mStartTime = startTime;
+        this.mUnit = pUnit;
     }
 
     public int getOp() {
